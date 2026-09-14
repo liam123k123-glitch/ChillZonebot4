@@ -1,1 +1,20 @@
 
+{
+  "name": "chillzone-v2",
+  "version": "2.0.0",
+  "description": "ChillZone Community Discord Bot",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "dependencies": {
+    "@discordjs/rest": "^2.5.1",
+    "discord-api-types": "^0.38.30",
+    "discord.js": "^14.24.2",
+    "dotenv": "^17.2.2",
+    "express": "^5.1.0"
+  }
+}
