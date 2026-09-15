@@ -1,6 +1,7 @@
 // ============================================================
 // 🔵 CHILLZONE COMMUNITY BOT
-// Discord.js v14 | Render | Gemini 3.6 Flash
+// Discord.js v14 + PostgreSQL + Gemini
+// Render Ready
 // ============================================================
 
 require("dotenv").config();
@@ -26,8 +27,7 @@ const {
     ActivityType
 } = require("discord.js");
 
-const fs = require("fs");
-const path = require("path");
+const { Pool } = require("pg");
 const http = require("http");
 
 // ============================================================
@@ -38,126 +38,250 @@ const TOKEN = process.env.DISCORD_TOKEN;
 const CLIENT_ID = process.env.CLIENT_ID;
 const GUILD_ID = process.env.GUILD_ID;
 const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
+const DATABASE_URL = process.env.DATABASE_URL;
 
 if (!TOKEN) {
-    console.error("❌ DISCORD_TOKEN חסר ב-Render.");
+    console.error("❌ DISCORD_TOKEN חסר.");
     process.exit(1);
 }
 
 if (!CLIENT_ID) {
-    console.error("❌ CLIENT_ID חסר ב-Render.");
+    console.error("❌ CLIENT_ID חסר.");
+    process.exit(1);
+}
+
+if (!DATABASE_URL) {
+    console.error("❌ DATABASE_URL חסר ב-Render.");
+    console.error("הוסף PostgreSQL ל-Render והוסף את DATABASE_URL.");
     process.exit(1);
 }
 
 // ============================================================
-// 🔵 CLIENT
+// 🗄️ POSTGRESQL
+// ============================================================
+
+const pool = new Pool({
+    connectionString: DATABASE_URL,
+    ssl: {
+        rejectUnauthorized: false
+    }
+});
+
+async function initDatabase() {
+
+    try {
+
+        await pool.query(`
+            CREATE TABLE IF NOT EXISTS guild_settings (
+                guild_id TEXT PRIMARY KEY,
+                data JSONB NOT NULL DEFAULT '{}'::jsonb,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        `);
+
+        console.log("✅ PostgreSQL מחובר ומוכן.");
+
+    } catch (error) {
+
+        console.error(
+            "❌ PostgreSQL error:",
+            error
+        );
+
+        process.exit(1);
+    }
+}
+
+// ============================================================
+// 💾 DEFAULT SETTINGS
+// ============================================================
+
+function defaultGuildData() {
+
+    return {
+
+        botImage: null,
+
+        logsChannel: null,
+
+        welcomeChannel: null,
+
+        verifyChannel: null,
+        verifyRole: null,
+
+        ticketChannel: null,
+        ticketCategory: null,
+
+        staffRole: null,
+        muteRole: null,
+
+        suggestionChannel: null,
+        suggestionStaffChannel: null,
+        suggestionRole: null,
+
+        aiChannel: null,
+        aiEnabled: true,
+
+        linksChannel: null,
+        links: [],
+
+        countingChannel: null,
+        countingNumber: 0,
+        lastCounter: null,
+
+        tickets: {},
+        suggestions: {},
+
+        helpRequests: {}
+    };
+}
+
+// ============================================================
+// 💾 DATABASE FUNCTIONS
+// ============================================================
+
+const guildCache = new Map();
+
+async function getGuildData(guildId) {
+
+    if (guildCache.has(guildId)) {
+        return guildCache.get(guildId);
+    }
+
+    try {
+
+        const result = await pool.query(
+            `
+            SELECT data
+            FROM guild_settings
+            WHERE guild_id = $1
+            `,
+            [guildId]
+        );
+
+        if (result.rows.length === 0) {
+
+            const fresh =
+                defaultGuildData();
+
+            await pool.query(
+                `
+                INSERT INTO guild_settings
+                (guild_id, data)
+                VALUES ($1, $2::jsonb)
+                ON CONFLICT (guild_id)
+                DO NOTHING
+                `,
+                [
+                    guildId,
+                    JSON.stringify(fresh)
+                ]
+            );
+
+            guildCache.set(
+                guildId,
+                fresh
+            );
+
+            return fresh;
+        }
+
+        const saved =
+            result.rows[0].data || {};
+
+        const merged = {
+            ...defaultGuildData(),
+            ...saved
+        };
+
+        guildCache.set(
+            guildId,
+            merged
+        );
+
+        return merged;
+
+    } catch (error) {
+
+        console.error(
+            "❌ getGuildData error:",
+            error
+        );
+
+        return defaultGuildData();
+    }
+}
+
+async function saveGuildData(
+    guildId,
+    guildData
+) {
+
+    try {
+
+        guildCache.set(
+            guildId,
+            guildData
+        );
+
+        await pool.query(
+            `
+            INSERT INTO guild_settings
+            (guild_id, data, updated_at)
+            VALUES ($1, $2::jsonb, CURRENT_TIMESTAMP)
+
+            ON CONFLICT (guild_id)
+            DO UPDATE SET
+                data = EXCLUDED.data,
+                updated_at = CURRENT_TIMESTAMP
+            `,
+            [
+                guildId,
+                JSON.stringify(guildData)
+            ]
+        );
+
+    } catch (error) {
+
+        console.error(
+            "❌ saveGuildData error:",
+            error
+        );
+    }
+}
+
+// ============================================================
+// 🔵 DISCORD CLIENT
 // ============================================================
 
 const client = new Client({
+
     intents: [
+
         GatewayIntentBits.Guilds,
+
         GatewayIntentBits.GuildMembers,
+
         GatewayIntentBits.GuildMessages,
+
         GatewayIntentBits.MessageContent,
+
         GatewayIntentBits.GuildVoiceStates
+
     ],
+
     partials: [
+
         Partials.Channel,
+
         Partials.Message,
+
         Partials.User,
+
         Partials.GuildMember
+
     ]
 });
-
-// ============================================================
-// 💾 DATA
-// ============================================================
-
-const DATA_FILE = path.join(__dirname, "data.json");
-
-let data = {
-    guilds: {}
-};
-
-function loadData() {
-    try {
-        if (!fs.existsSync(DATA_FILE)) {
-            fs.writeFileSync(
-                DATA_FILE,
-                JSON.stringify(data, null, 2)
-            );
-            return;
-        }
-
-        const raw = fs.readFileSync(DATA_FILE, "utf8");
-
-        if (raw.trim()) {
-            data = JSON.parse(raw);
-        }
-
-        if (!data.guilds) {
-            data.guilds = {};
-        }
-
-    } catch (error) {
-        console.error("❌ שגיאה בטעינת data.json:", error);
-    }
-}
-
-function saveData() {
-    try {
-        fs.writeFileSync(
-            DATA_FILE,
-            JSON.stringify(data, null, 2)
-        );
-    } catch (error) {
-        console.error("❌ שגיאה בשמירת data.json:", error);
-    }
-}
-
-function getGuildData(guildId) {
-
-    if (!data.guilds[guildId]) {
-        data.guilds[guildId] = {
-            botImage: null,
-
-            logsChannel: null,
-
-            welcomeChannel: null,
-
-            verifyChannel: null,
-            verifyRole: null,
-
-            ticketChannel: null,
-            ticketCategory: null,
-
-            staffRole: null,
-            muteRole: null,
-
-            suggestionChannel: null,
-            suggestionStaffChannel: null,
-
-            linksChannel: null,
-            links: [],
-
-            aiEnabled: true,
-
-            tickets: {},
-
-            suggestions: {},
-
-            countingChannel: null,
-            countingNumber: 0,
-            lastCounter: null
-        };
-
-        saveData();
-    }
-
-    return data.guilds[guildId];
-}
-
-loadData();
 
 // ============================================================
 // 🎨 COLORS
@@ -169,15 +293,55 @@ const BLUE = 0x3498DB;
 // 🧰 HELPERS
 // ============================================================
 
+function clip(
+    text,
+    length = 1000
+) {
+
+    text =
+        String(text || "לא ידוע");
+
+    if (text.length <= length) {
+        return text;
+    }
+
+    return (
+        text.slice(
+            0,
+            length - 3
+        ) + "..."
+    );
+}
+
+function cleanMentions(text) {
+
+    return String(text || "")
+        .replace(
+            /@everyone/g,
+            "@\u200beveryone"
+        )
+        .replace(
+            /@here/g,
+            "@\u200bhere"
+        );
+}
+
 function getBotImage(guild) {
 
-    const config = getGuildData(guild.id);
+    const config =
+        guild
+            ? guildCache.get(guild.id)
+            : null;
 
-    if (config.botImage) {
+    if (
+        config &&
+        config.botImage
+    ) {
         return config.botImage;
     }
 
     if (client.user) {
+
         return client.user.displayAvatarURL({
             extension: "png",
             size: 256
@@ -187,15 +351,23 @@ function getBotImage(guild) {
     return null;
 }
 
-function makeEmbed(guild, title, description) {
+function makeEmbed(
+    guild,
+    title,
+    description
+) {
 
-    const embed = new EmbedBuilder()
-        .setColor(BLUE)
-        .setTitle(title)
-        .setDescription(description)
-        .setTimestamp();
+    const embed =
+        new EmbedBuilder()
+            .setColor(BLUE)
+            .setTitle(title)
+            .setDescription(
+                description
+            )
+            .setTimestamp();
 
-    const image = getBotImage(guild);
+    const image =
+        getBotImage(guild);
 
     if (image) {
         embed.setThumbnail(image);
@@ -204,45 +376,60 @@ function makeEmbed(guild, title, description) {
     return embed;
 }
 
-function isStaff(member) {
+async function isStaffMember(
+    member
+) {
 
-    if (!member || !member.guild) {
+    if (!member) {
         return false;
     }
 
-    const config = getGuildData(member.guild.id);
-
     if (
-        config.staffRole &&
-        member.roles.cache.has(config.staffRole)
+        member.permissions.has(
+            PermissionsBitField.Flags.Administrator
+        )
     ) {
         return true;
     }
 
-    return member.permissions.has(
-        PermissionsBitField.Flags.Administrator
-    );
+    const config =
+        await getGuildData(
+            member.guild.id
+        );
+
+    if (
+        config.staffRole &&
+        member.roles.cache.has(
+            config.staffRole
+        )
+    ) {
+        return true;
+    }
+
+    return false;
 }
 
-function cleanMentions(text) {
-
-    return String(text)
-        .replace(/@everyone/g, "@\u200beveryone")
-        .replace(/@here/g, "@\u200bhere");
-}
-
-async function sendLog(guild, title, description) {
+async function sendLog(
+    guild,
+    title,
+    description
+) {
 
     try {
 
-        const config = getGuildData(guild.id);
+        const config =
+            await getGuildData(
+                guild.id
+            );
 
         if (!config.logsChannel) {
             return;
         }
 
         const channel =
-            guild.channels.cache.get(config.logsChannel);
+            guild.channels.cache.get(
+                config.logsChannel
+            );
 
         if (!channel) {
             return;
@@ -260,7 +447,11 @@ async function sendLog(guild, title, description) {
         });
 
     } catch (error) {
-        console.error("❌ Log error:", error);
+
+        console.error(
+            "❌ Log error:",
+            error
+        );
     }
 }
 
@@ -272,31 +463,33 @@ const commands = [
 
     new SlashCommandBuilder()
         .setName("setup")
-        .setDescription("מציג את כל הגדרות ChillZone"),
+        .setDescription("מציג את כל הגדרות הבוט"),
 
     new SlashCommandBuilder()
-        .setName("הגדר-תמונה")
+        .setName("set-image")
         .setDescription("הגדרת תמונת הבוט")
         .addStringOption(option =>
             option
                 .setName("url")
-                .setDescription("URL ישיר לתמונה")
+                .setDescription("קישור ישיר לתמונה")
                 .setRequired(true)
         ),
 
     new SlashCommandBuilder()
-        .setName("הגדר-לוגים")
-        .setDescription("הגדרת חדר הלוגים")
+        .setName("set-logs")
+        .setDescription("הגדרת חדר לוגים")
         .addChannelOption(option =>
             option
                 .setName("channel")
                 .setDescription("חדר הלוגים")
                 .setRequired(true)
-                .addChannelTypes(ChannelType.GuildText)
+                .addChannelTypes(
+                    ChannelType.GuildText
+                )
         ),
 
     new SlashCommandBuilder()
-        .setName("הגדר-צוות")
+        .setName("set-staff")
         .setDescription("הגדרת Staff Role")
         .addRoleOption(option =>
             option
@@ -306,7 +499,7 @@ const commands = [
         ),
 
     new SlashCommandBuilder()
-        .setName("הגדר-השתקה")
+        .setName("set-mute")
         .setDescription("הגדרת Mute Role")
         .addRoleOption(option =>
             option
@@ -316,136 +509,173 @@ const commands = [
         ),
 
     new SlashCommandBuilder()
-        .setName("הגדר-קטגוריה-טיקטים")
-        .setDescription("הגדרת הקטגוריה שבה ייפתחו הטיקטים")
+        .setName("set-ai")
+        .setDescription("הגדרת חדר ה-AI")
+        .addChannelOption(option =>
+            option
+                .setName("channel")
+                .setDescription("חדר שבו הבוט יענה ב-AI")
+                .setRequired(true)
+                .addChannelTypes(
+                    ChannelType.GuildText
+                )
+        ),
+
+    new SlashCommandBuilder()
+        .setName("set-ticket-category")
+        .setDescription("הגדרת קטגוריית הטיקטים")
         .addChannelOption(option =>
             option
                 .setName("category")
                 .setDescription("קטגוריית הטיקטים")
                 .setRequired(true)
-                .addChannelTypes(ChannelType.GuildCategory)
+                .addChannelTypes(
+                    ChannelType.GuildCategory
+                )
         ),
 
     new SlashCommandBuilder()
-        .setName("הגדר-טיקטים")
+        .setName("set-ticket-channel")
         .setDescription("הגדרת חדר פאנל הטיקטים")
         .addChannelOption(option =>
             option
                 .setName("channel")
-                .setDescription("החדר שבו יישלח הפאנל")
+                .setDescription("חדר הפאנל")
                 .setRequired(true)
-                .addChannelTypes(ChannelType.GuildText)
+                .addChannelTypes(
+                    ChannelType.GuildText
+                )
         ),
 
     new SlashCommandBuilder()
-        .setName("פאנל-טיקטים")
+        .setName("ticket-panel")
         .setDescription("שליחת פאנל טיקטים"),
 
     new SlashCommandBuilder()
-        .setName("פאנל-צוות")
+        .setName("staff-panel")
         .setDescription("שליחת פאנל צוות"),
 
     new SlashCommandBuilder()
-        .setName("הגדר-אימות")
-        .setDescription("הגדרת מערכת האימות")
+        .setName("set-verify")
+        .setDescription("הגדרת מערכת אימות")
         .addChannelOption(option =>
             option
                 .setName("channel")
                 .setDescription("חדר האימות")
                 .setRequired(true)
-                .addChannelTypes(ChannelType.GuildText)
+                .addChannelTypes(
+                    ChannelType.GuildText
+                )
         )
         .addRoleOption(option =>
             option
                 .setName("role")
-                .setDescription("הרול שמקבלים באימות")
+                .setDescription("הרול שמקבלים")
                 .setRequired(true)
         ),
 
     new SlashCommandBuilder()
-        .setName("פאנל-אימות")
-        .setDescription("שליחת פאנל האימות"),
+        .setName("verify-panel")
+        .setDescription("שליחת פאנל אימות"),
 
     new SlashCommandBuilder()
-        .setName("הגדר-ברוכים-הבאים")
-        .setDescription("הגדרת חדר Welcome")
+        .setName("set-welcome")
+        .setDescription("הגדרת חדר ברוכים הבאים")
         .addChannelOption(option =>
             option
                 .setName("channel")
-                .setDescription("חדר ברוכים הבאים")
+                .setDescription("חדר Welcome")
                 .setRequired(true)
-                .addChannelTypes(ChannelType.GuildText)
+                .addChannelTypes(
+                    ChannelType.GuildText
+                )
         ),
 
     new SlashCommandBuilder()
-        .setName("הגדר-הצעות")
+        .setName("set-suggestions")
         .setDescription("הגדרת מערכת ההצעות")
         .addChannelOption(option =>
             option
                 .setName("channel")
-                .setDescription("חדר שאליו חברים שולחים הצעות")
+                .setDescription("חדר ההצעות")
                 .setRequired(true)
-                .addChannelTypes(ChannelType.GuildText)
+                .addChannelTypes(
+                    ChannelType.GuildText
+                )
         )
         .addChannelOption(option =>
             option
                 .setName("staffchannel")
-                .setDescription("חדר שאליו הצעות מגיעות לצוות")
+                .setDescription("חדר צוות ההצעות")
                 .setRequired(true)
-                .addChannelTypes(ChannelType.GuildText)
+                .addChannelTypes(
+                    ChannelType.GuildText
+                )
+        )
+        .addRoleOption(option =>
+            option
+                .setName("role")
+                .setDescription("הרול שיתויג בכל הצעה")
+                .setRequired(true)
         ),
 
     new SlashCommandBuilder()
-        .setName("הגדר-חדר-קישורים")
+        .setName("set-links")
         .setDescription("הגדרת חדר הקישורים")
         .addChannelOption(option =>
             option
                 .setName("channel")
                 .setDescription("חדר הקישורים")
                 .setRequired(true)
-                .addChannelTypes(ChannelType.GuildText)
+                .addChannelTypes(
+                    ChannelType.GuildText
+                )
         ),
 
     new SlashCommandBuilder()
-        .setName("הוסף-קישור")
+        .setName("add-link")
         .setDescription("הוספת קישור")
         .addStringOption(option =>
             option
-                .setName("שם")
+                .setName("name")
                 .setDescription("שם הקישור")
                 .setRequired(true)
         )
         .addStringOption(option =>
             option
-                .setName("קישור")
-                .setDescription("הקישור עצמו")
+                .setName("url")
+                .setDescription("הקישור")
                 .setRequired(true)
         ),
 
     new SlashCommandBuilder()
-        .setName("מחק-קישורים")
+        .setName("clear-links")
         .setDescription("מחיקת כל הקישורים"),
 
     new SlashCommandBuilder()
-        .setName("פאנל-קישורים")
-        .setDescription("שליחת פאנל הקישורים"),
+        .setName("links-panel")
+        .setDescription("שליחת פאנל קישורים"),
 
     new SlashCommandBuilder()
-        .setName("הגדר-ספירה")
+        .setName("set-counting")
         .setDescription("הגדרת חדר ספירה")
         .addChannelOption(option =>
             option
                 .setName("channel")
                 .setDescription("חדר הספירה")
                 .setRequired(true)
-                .addChannelTypes(ChannelType.GuildText)
+                .addChannelTypes(
+                    ChannelType.GuildText
+                )
         ),
 
     new SlashCommandBuilder()
-        .setName("איפוס-ספירה")
-        .setDescription("איפוס מערכת הספירה")
+        .setName("reset-counting")
+        .setDescription("איפוס הספירה")
 
-].map(command => command.toJSON());
+].map(command =>
+    command.toJSON()
+);
 
 // ============================================================
 // 📡 REGISTER COMMANDS
@@ -456,8 +686,9 @@ async function registerCommands() {
     try {
 
         const rest =
-            new REST({ version: "10" })
-                .setToken(TOKEN);
+            new REST({
+                version: "10"
+            }).setToken(TOKEN);
 
         if (GUILD_ID) {
 
@@ -472,7 +703,7 @@ async function registerCommands() {
             );
 
             console.log(
-                "✅ Slash commands registered."
+                "✅ Slash commands registered to guild."
             );
 
         } else {
@@ -504,24 +735,41 @@ async function registerCommands() {
 // 🟢 READY
 // ============================================================
 
-client.once("ready", async () => {
+client.once(
+    "ready",
+    async () => {
 
-    console.log(
-        `🔵 ChillZone מחובר בתור ${client.user.tag}`
-    );
+        console.log(
+            `🔵 ChillZone מחובר בתור ${client.user.tag}`
+        );
 
-    client.user.setPresence({
-        activities: [
-            {
-                name: "ChillZone 🔵",
-                type: ActivityType.Watching
-            }
-        ],
-        status: "online"
-    });
+        client.user.setPresence({
 
-    await registerCommands();
-});
+            activities: [
+                {
+                    name: "ChillZone 🔵",
+                    type: ActivityType.Watching
+                }
+            ],
+
+            status: "online"
+        });
+
+        await initDatabase();
+
+        // טעינת כל השרתים לזיכרון
+        for (
+            const guild of client.guilds.cache.values()
+        ) {
+
+            await getGuildData(
+                guild.id
+            );
+        }
+
+        await registerCommands();
+    }
+);
 
 // ============================================================
 // 👋 WELCOME
@@ -534,38 +782,40 @@ client.on(
         try {
 
             const config =
-                getGuildData(member.guild.id);
-
-            if (!config.welcomeChannel) {
-                return;
-            }
-
-            const channel =
-                member.guild.channels.cache.get(
-                    config.welcomeChannel
+                await getGuildData(
+                    member.guild.id
                 );
 
-            if (!channel) {
-                return;
+            if (
+                config.welcomeChannel
+            ) {
+
+                const channel =
+                    member.guild.channels.cache.get(
+                        config.welcomeChannel
+                    );
+
+                if (channel) {
+
+                    const embed =
+                        makeEmbed(
+                            member.guild,
+                            "👋 ברוכים הבאים ל־ChillZone!",
+                            `היי ${member}! 👋\n\n`
+                            + `שמחים שהצטרפת לקהילה שלנו 💙\n`
+                            + `תיהנה, תכיר אנשים ותשתתף בקהילה!`
+                        );
+
+                    await channel.send({
+                        content: `${member}`,
+                        embeds: [embed]
+                    });
+                }
             }
-
-            const embed =
-                makeEmbed(
-                    member.guild,
-                    "👋 ברוכים הבאים ל־ChillZone!",
-                    `היי ${member}! 👋\n\n`
-                    + `שמחים שהצטרפת לקהילה שלנו 💙\n`
-                    + `תעבור על החדרים ותהנה!`
-                );
-
-            await channel.send({
-                content: `${member}`,
-                embeds: [embed]
-            });
 
             await sendLog(
                 member.guild,
-                "👋 משתמש נכנס לשרת",
+                "👋 משתמש נכנס",
                 `**משתמש:** ${member.user.tag}\n`
                 + `**ID:** ${member.id}`
             );
@@ -577,6 +827,23 @@ client.on(
                 error
             );
         }
+    }
+);
+
+// ============================================================
+// 🚪 MEMBER LEAVE
+// ============================================================
+
+client.on(
+    "guildMemberRemove",
+    async member => {
+
+        await sendLog(
+            member.guild,
+            "🚪 משתמש יצא",
+            `**משתמש:** ${member.user?.tag || "לא ידוע"}\n`
+            + `**ID:** ${member.id}`
+        );
     }
 );
 
@@ -593,10 +860,9 @@ async function sendVerifyPanel(
         makeEmbed(
             guild,
             "🔐 אימות ChillZone",
-            "ברוכים הבאים לשרת!\n\n"
-            + "כדי לקבל גישה לשרת ולאמת את עצמך, "
-            + "לחץ על הכפתור **אימות** למטה.\n\n"
-            + "✅ לאחר האימות תקבל את הרול שהוגדר."
+            "ברוכים הבאים לשרת! 💙\n\n"
+            + "לחץ על הכפתור למטה כדי לאמת את עצמך.\n\n"
+            + "לאחר האימות תקבל את הרול שהוגדר."
         );
 
     const row =
@@ -632,15 +898,14 @@ async function sendTicketPanel(
     const embed =
         makeEmbed(
             guild,
-            "🎫 מערכת הטיקטים של ChillZone",
-            "צריך עזרה? אנחנו כאן בשבילך! 💙\n\n"
-            + "בחר את סוג הפנייה המתאים לך:\n\n"
-            + "🆘 **תמיכה** — עזרה כללית\n"
-            + "🚨 **דיווח** — דיווח על משתמש/בעיה\n"
-            + "👮 **בחינה לצוות** — פנייה בנושא צוות\n"
-            + "❓ **אחר** — כל דבר שלא נמצא ברשימה\n\n"
-            + "לאחר פתיחת הטיקט, איש צוות אחד יוכל לקחת "
-            + "אותו ולהתחיל לטפל בפנייה."
+            "🎫 מערכת הטיקטים",
+            "צריך עזרה? אנחנו כאן בשבילך 💙\n\n"
+            + "בחר את סוג הפנייה:\n\n"
+            + "🆘 **תמיכה**\n"
+            + "🚨 **דיווח**\n"
+            + "👮 **בחינה לצוות**\n"
+            + "❓ **אחר**\n\n"
+            + "לאחר פתיחת הטיקט, איש צוות אחד יוכל לקחת אותו."
         );
 
     const menu =
@@ -649,14 +914,14 @@ async function sendTicketPanel(
                 "ticket_type"
             )
             .setPlaceholder(
-                "🎫 בחר את סוג הטיקט"
+                "🎫 בחר סוג טיקט"
             )
             .addOptions(
 
                 new StringSelectMenuOptionBuilder()
                     .setLabel("תמיכה")
                     .setDescription(
-                        "קבלת עזרה מצוות ChillZone"
+                        "עזרה כללית"
                     )
                     .setEmoji("🆘")
                     .setValue("support"),
@@ -672,7 +937,7 @@ async function sendTicketPanel(
                 new StringSelectMenuOptionBuilder()
                     .setLabel("בחינה לצוות")
                     .setDescription(
-                        "פנייה בנושא הצטרפות לצוות"
+                        "פנייה בנושא צוות"
                     )
                     .setEmoji("👮")
                     .setValue("staff"),
@@ -697,6 +962,62 @@ async function sendTicketPanel(
 }
 
 // ============================================================
+// 🎛️ TICKET BUTTONS
+// ============================================================
+
+function createTicketButtons(
+    claimed
+) {
+
+    return new ActionRowBuilder()
+        .addComponents(
+
+            new ButtonBuilder()
+                .setCustomId(
+                    "ticket_claim"
+                )
+                .setLabel(
+                    claimed
+                        ? "טיקט נלקח"
+                        : "קח טיקט"
+                )
+                .setEmoji("🙋")
+                .setStyle(
+                    claimed
+                        ? ButtonStyle.Secondary
+                        : ButtonStyle.Primary
+                )
+                .setDisabled(
+                    claimed
+                ),
+
+            new ButtonBuilder()
+                .setCustomId(
+                    "ticket_add_staff"
+                )
+                .setLabel(
+                    "הוסף צוות"
+                )
+                .setEmoji("👥")
+                .setStyle(
+                    ButtonStyle.Primary
+                ),
+
+            new ButtonBuilder()
+                .setCustomId(
+                    "ticket_close"
+                )
+                .setLabel(
+                    "סגור טיקט"
+                )
+                .setEmoji("🔒")
+                .setStyle(
+                    ButtonStyle.Danger
+                )
+        );
+}
+
+// ============================================================
 // 🎫 CREATE TICKET
 // ============================================================
 
@@ -712,7 +1033,9 @@ async function createTicket(
         interaction.member;
 
     const config =
-        getGuildData(guild.id);
+        await getGuildData(
+            guild.id
+        );
 
     const existing =
         Object.entries(
@@ -743,8 +1066,8 @@ async function createTicket(
 
         return interaction.reply({
             content:
-                "❌ הקטגוריה של הטיקטים עדיין לא הוגדרה.\n"
-                + "אדמין צריך להשתמש ב־`/הגדר-קטגוריה-טיקטים`.",
+                "❌ עדיין לא הוגדרה קטגוריית טיקטים.\n"
+                + "השתמש ב־`/set-ticket-category`.",
             ephemeral: true
         });
     }
@@ -754,7 +1077,10 @@ async function createTicket(
             config.ticketCategory
         );
 
-    if (!category) {
+    if (
+        !category ||
+        category.type !== ChannelType.GuildCategory
+    ) {
 
         return interaction.reply({
             content:
@@ -764,17 +1090,27 @@ async function createTicket(
     }
 
     const typeNames = {
+
         support: "תמיכה",
+
         report: "דיווח",
+
         staff: "בחינה לצוות",
+
         other: "אחר"
     };
 
     const safeUsername =
         member.user.username
             .toLowerCase()
-            .replace(/[^a-z0-9]/g, "")
-            .slice(0, 18) ||
+            .replace(
+                /[^a-z0-9]/g,
+                ""
+            )
+            .slice(
+                0,
+                18
+            ) ||
         "user";
 
     const channelName =
@@ -783,46 +1119,97 @@ async function createTicket(
     const overwrites = [
 
         {
-            id: guild.roles.everyone.id,
+            id:
+                guild.roles.everyone.id,
+
             deny: [
                 PermissionsBitField.Flags.ViewChannel
             ]
         },
 
         {
-            id: member.id,
+            id:
+                member.id,
+
             allow: [
+
                 PermissionsBitField.Flags.ViewChannel,
+
                 PermissionsBitField.Flags.SendMessages,
+
                 PermissionsBitField.Flags.ReadMessageHistory
+
             ]
         }
 
     ];
 
-    // חשוב:
-    // לא נותנים לכל צוות גישה אוטומטית.
-    // רק מנהלים/בוט יוכלו לראות לפי ההרשאות שלהם,
-    // ואיש הצוות שלוקח את הטיקט יקבל גישה.
+    // רק צוות עם Staff Role יקבל גישה לפני Claim
+    if (config.staffRole) {
+
+        overwrites.push({
+
+            id:
+                config.staffRole,
+
+            allow: [
+
+                PermissionsBitField.Flags.ViewChannel,
+
+                PermissionsBitField.Flags.SendMessages,
+
+                PermissionsBitField.Flags.ReadMessageHistory
+
+            ]
+        });
+    }
 
     const channel =
         await guild.channels.create({
-            name: channelName,
-            type: ChannelType.GuildText,
-            parent: category.id,
-            permissionOverwrites: overwrites
+
+            name:
+                channelName,
+
+            type:
+                ChannelType.GuildText,
+
+            parent:
+                category.id,
+
+            permissionOverwrites:
+                overwrites
         });
 
-    config.tickets[channel.id] = {
-        userId: member.id,
-        type: type,
-        claimed: false,
-        claimedBy: null,
-        addedStaff: [],
-        createdAt: Date.now()
+    config.tickets[
+        channel.id
+    ] = {
+
+        userId:
+            member.id,
+
+        type:
+            type,
+
+        claimed:
+            false,
+
+        claimedBy:
+            null,
+
+        addedStaff:
+            [],
+
+        aiHistory:
+            [],
+
+        createdAt:
+            Date.now()
     };
 
-    saveData();
+    await saveGuildData(
+        guild.id,
+        config
+    );
 
     const embed =
         makeEmbed(
@@ -830,30 +1217,40 @@ async function createTicket(
             `🎫 טיקט — ${typeNames[type]}`,
             `שלום ${member}! 👋\n\n`
             + `הטיקט שלך נפתח בהצלחה.\n`
-            + `תאר כאן בצורה ברורה במה אתה צריך עזרה.\n\n`
-            + `🤖 **ChillZone AI** יכול לעזור לך כל עוד איש צוות עדיין לא לקח את הטיקט.\n\n`
-            + `🙋 ברגע שאיש צוות ייקח את הטיקט, ה־AI יפסיק לענות.\n`
-            + `👥 ניתן להוסיף אנשי צוות נוספים באמצעות הכפתור **הוסף צוות**.`
+            + `כתוב כאן במה אתה צריך עזרה.\n\n`
+            + `🤖 **ה-AI של ChillZone פעיל כרגע.**\n`
+            + `הוא יענה עד שאיש צוות ייקח את הטיקט.\n\n`
+            + `👥 לאחר Claim ניתן להוסיף אנשי צוות דרך **הוסף צוות**.`
         );
 
-    const row =
-        createTicketButtons(false);
-
     await channel.send({
-        content: `${member}`,
-        embeds: [embed],
-        components: [row]
+
+        content:
+            `${member}`,
+
+        embeds: [
+            embed
+        ],
+
+        components: [
+            createTicketButtons(false)
+        ]
     });
 
     await interaction.reply({
+
         content:
-            `✅ הטיקט שלך נפתח בהצלחה: ${channel}`,
+            `✅ הטיקט שלך נפתח: ${channel}`,
+
         ephemeral: true
     });
 
     await sendLog(
+
         guild,
+
         "🎫 טיקט נפתח",
+
         `**משתמש:** ${member.user.tag}\n`
         + `**ID:** ${member.id}\n`
         + `**סוג:** ${typeNames[type]}\n`
@@ -862,65 +1259,17 @@ async function createTicket(
 }
 
 // ============================================================
-// 🎛️ TICKET BUTTONS
+// 👥 STAFF MEMBERS
 // ============================================================
 
-function createTicketButtons(claimed) {
-
-    return new ActionRowBuilder()
-        .addComponents(
-
-            new ButtonBuilder()
-                .setCustomId(
-                    "ticket_claim"
-                )
-                .setLabel(
-                    claimed
-                        ? "טיקט נלקח"
-                        : "קח טיקט"
-                )
-                .setEmoji("🙋")
-                .setStyle(
-                    claimed
-                        ? ButtonStyle.Secondary
-                        : ButtonStyle.Primary
-                )
-                .setDisabled(claimed),
-
-            new ButtonBuilder()
-                .setCustomId(
-                    "ticket_add_staff"
-                )
-                .setLabel(
-                    "הוסף צוות"
-                )
-                .setEmoji("👥")
-                .setStyle(
-                    ButtonStyle.Primary
-                ),
-
-            new ButtonBuilder()
-                .setCustomId(
-                    "ticket_close"
-                )
-                .setLabel(
-                    "סגור טיקט"
-                )
-                .setEmoji("🔒")
-                .setStyle(
-                    ButtonStyle.Danger
-                )
-        );
-}
-
-// ============================================================
-// 👥 GET STAFF MEMBERS
-// ============================================================
-
-async function getStaffMembers(guild) {
+async function getStaffMembers(
+    guild
+) {
 
     const config =
-        getGuildData(guild.id);
+        await getGuildData(
+            guild.id
+        );
 
     if (!config.staffRole) {
         return [];
@@ -935,26 +1284,110 @@ async function getStaffMembers(guild) {
         return [];
     }
 
-    const members =
-        [...role.members.values()]
-            .filter(member =>
-                !member.user.bot
-            )
-            .slice(0, 25);
-
-    return members;
+    return [
+        ...role.members.values()
+    ].filter(
+        member =>
+            !member.user.bot
+    );
 }
 
 // ============================================================
-// 🤖 GEMINI
+// 👥 STAFF SELECT
+// ============================================================
+
+async function showStaffSelector(
+    interaction
+) {
+
+    const guild =
+        interaction.guild;
+
+    const members =
+        await getStaffMembers(
+            guild
+        );
+
+    if (!members.length) {
+
+        return interaction.reply({
+            content:
+                "❌ לא נמצאו משתמשים עם Staff Role.",
+            ephemeral: true
+        });
+    }
+
+    const visible =
+        members.slice(
+            0,
+            25
+        );
+
+    const options =
+        visible.map(
+            member =>
+
+                new StringSelectMenuOptionBuilder()
+                    .setLabel(
+                        member.user.username
+                            .slice(0, 100)
+                    )
+                    .setDescription(
+                        `ID: ${member.id}`
+                    )
+                    .setValue(
+                        member.id
+                    )
+        );
+
+    const menu =
+        new StringSelectMenuBuilder()
+            .setCustomId(
+                `ticket_add_staff_select_${interaction.channel.id}`
+            )
+            .setPlaceholder(
+                "👥 בחר איש צוות"
+            )
+            .addOptions(
+                options
+            );
+
+    const row =
+        new ActionRowBuilder()
+            .addComponents(
+                menu
+            );
+
+    await interaction.reply({
+
+        content:
+            members.length > 25
+                ? "👥 בחר איש צוות. כרגע מוצגים 25 הראשונים."
+                : "👥 בחר איש צוות להוספה לטיקט:",
+
+        components: [
+            row
+        ],
+
+        ephemeral: true
+    });
+}
+
+// ============================================================
+// 🤖 GEMINI AI
 // ============================================================
 
 async function askGemini(
-    userMessage,
-    conversation = []
+    message,
+    history = []
 ) {
 
     if (!GEMINI_API_KEY) {
+
+        console.error(
+            "❌ GEMINI_API_KEY חסר."
+        );
+
         return null;
     }
 
@@ -962,43 +1395,79 @@ async function askGemini(
 
         const contents = [];
 
-        for (const item of conversation) {
+        for (
+            const item of history.slice(-20)
+        ) {
 
             contents.push({
-                role: item.role,
+
+                role:
+                    item.role,
+
                 parts: [
                     {
-                        text: item.text
+                        text:
+                            item.text
                     }
                 ]
             });
         }
 
         contents.push({
-            role: "user",
+
+            role:
+                "user",
+
             parts: [
                 {
-                    text: userMessage
+                    text:
+                        message
                 }
             ]
         });
 
         const response =
             await fetch(
+
                 `https://generativelanguage.googleapis.com/v1beta/models/gemini-3.6-flash:generateContent?key=${encodeURIComponent(GEMINI_API_KEY)}`,
+
                 {
-                    method: "POST",
+
+                    method:
+                        "POST",
+
                     headers: {
+
                         "Content-Type":
                             "application/json"
                     },
-                    body: JSON.stringify({
-                        contents,
-                        generationConfig: {
-                            temperature: 0.7,
-                            maxOutputTokens: 2048
-                        }
-                    })
+
+                    body:
+                        JSON.stringify({
+
+                            contents,
+
+                            systemInstruction: {
+
+                                parts: [
+
+                                    {
+                                        text:
+                                            "אתה ChillZone AI. ענה בעברית בצורה ברורה, ידידותית ומפורטת. אל תקצר תשובות בכוונה. אם המשתמש מבקש משהו שדורש איש צוות, הסבר לו שאיש צוות יוכל לטפל בזה. אל תטען שאתה איש צוות."
+                                    }
+
+                                ]
+                            },
+
+                            generationConfig: {
+
+                                temperature:
+                                    0.7,
+
+                                maxOutputTokens:
+                                    4096
+                            }
+                        })
                 }
             );
 
@@ -1008,7 +1477,7 @@ async function askGemini(
         if (!response.ok) {
 
             console.error(
-                "❌ Gemini API error:",
+                "❌ Gemini API:",
                 result
             );
 
@@ -1019,7 +1488,10 @@ async function askGemini(
             result
                 ?.candidates?.[0]
                 ?.content?.parts
-                ?.map(part => part.text || "")
+                ?.map(
+                    part =>
+                        part.text || ""
+                )
                 .join("")
                 .trim();
 
@@ -1028,7 +1500,7 @@ async function askGemini(
     } catch (error) {
 
         console.error(
-            "❌ Gemini request error:",
+            "❌ Gemini error:",
             error
         );
 
@@ -1037,7 +1509,74 @@ async function askGemini(
 }
 
 // ============================================================
-// 🤖 TICKET AI + !הצעה
+// 🤖 SPLIT AI MESSAGE
+// ============================================================
+
+function splitMessage(
+    text
+) {
+
+    const chunks = [];
+
+    let remaining =
+        String(text);
+
+    while (
+        remaining.length > 0
+    ) {
+
+        if (
+            remaining.length <= 1900
+        ) {
+
+            chunks.push(
+                remaining
+            );
+
+            break;
+        }
+
+        let cut =
+            remaining.lastIndexOf(
+                "\n",
+                1900
+            );
+
+        if (
+            cut < 500
+        ) {
+
+            cut =
+                remaining.lastIndexOf(
+                    " ",
+                    1900
+                );
+        }
+
+        if (
+            cut <= 0
+        ) {
+            cut = 1900;
+        }
+
+        chunks.push(
+            remaining.slice(
+                0,
+                cut
+            )
+        );
+
+        remaining =
+            remaining
+                .slice(cut)
+                .trimStart();
+    }
+
+    return chunks;
+}
+
+// ============================================================
+// 💬 MESSAGE CREATE
 // ============================================================
 
 client.on(
@@ -1055,10 +1594,103 @@ client.on(
             message.guild;
 
         const config =
-            getGuildData(guild.id);
+            await getGuildData(
+                guild.id
+            );
 
         // ====================================================
-        // 💡 SUGGESTION
+        // 🧹 !cl 1-100
+        // ====================================================
+
+        const clMatch =
+            message.content
+                .trim()
+                .match(
+                    /^!cl\s+(\d+)$/i
+                );
+
+        if (clMatch) {
+
+            if (
+                !(await isStaffMember(
+                    message.member
+                ))
+            ) {
+
+                await message.reply(
+                    "❌ רק צוות יכול להשתמש בפקודה הזאת."
+                );
+
+                return;
+            }
+
+            const amount =
+                parseInt(
+                    clMatch[1]
+                );
+
+            if (
+                amount < 1 ||
+                amount > 100
+            ) {
+
+                await message.reply(
+                    "❌ אפשר למחוק רק מספר בין 1 ל־100."
+                );
+
+                return;
+            }
+
+            try {
+
+                const deleted =
+                    await message.channel.bulkDelete(
+                        amount,
+                        true
+                    );
+
+                const confirmation =
+                    await message.channel.send(
+                        `🧹 נמחקו **${deleted.size}** הודעות בהצלחה.`
+                    );
+
+                setTimeout(
+                    () => {
+
+                        confirmation
+                            .delete()
+                            .catch(() => {});
+
+                    },
+                    3000
+                );
+
+                await sendLog(
+                    guild,
+                    "🧹 ניקוי הודעות",
+                    `**צוות:** ${message.author.tag}\n`
+                    + `**חדר:** ${message.channel}\n`
+                    + `**כמות שבוקשה:** ${amount}\n`
+                    + `**כמות שנמחקה:** ${deleted.size}`
+                );
+
+            } catch (error) {
+
+                console.error(
+                    "Clear error:",
+                    error
+                );
+
+                await message.reply(
+                    "❌ לא הצלחתי למחוק את ההודעות. ודא שלבוט יש Manage Messages."
+                );
+            }
+
+            return;
+        }
+
+        // ====================================================
+        // 💡 !הצעה
         // ====================================================
 
         if (
@@ -1070,7 +1702,9 @@ client.on(
             const suggestion =
                 message.content
                     .trim()
-                    .slice("!הצעה".length)
+                    .slice(
+                        "!הצעה".length
+                    )
                     .trim();
 
             if (!suggestion) {
@@ -1082,7 +1716,9 @@ client.on(
                 return;
             }
 
-            if (!config.suggestionChannel) {
+            if (
+                !config.suggestionChannel
+            ) {
 
                 await message.reply(
                     "❌ חדר ההצעות עדיין לא הוגדר."
@@ -1097,13 +1733,15 @@ client.on(
             ) {
 
                 await message.reply(
-                    `❌ את ההצעה צריך לשלוח בחדר <#${config.suggestionChannel}>.`
+                    `❌ שלח את ההצעה בחדר <#${config.suggestionChannel}>.`
                 );
 
                 return;
             }
 
-            if (!config.suggestionStaffChannel) {
+            if (
+                !config.suggestionStaffChannel
+            ) {
 
                 await message.reply(
                     "❌ חדר צוות ההצעות עדיין לא הוגדר."
@@ -1129,14 +1767,33 @@ client.on(
             const suggestionId =
                 `${Date.now()}-${message.author.id}`;
 
-            config.suggestions[suggestionId] = {
-                userId: message.author.id,
-                content: suggestion,
-                createdAt: Date.now(),
-                decided: false
+            config.suggestions[
+                suggestionId
+            ] = {
+
+                userId:
+                    message.author.id,
+
+                content:
+                    suggestion,
+
+                createdAt:
+                    Date.now(),
+
+                decided:
+                    false,
+
+                accepted:
+                    null,
+
+                decidedBy:
+                    null
             };
 
-            saveData();
+            await saveGuildData(
+                guild.id,
+                config
+            );
 
             const embed =
                 makeEmbed(
@@ -1147,8 +1804,12 @@ client.on(
                 );
 
             embed.addFields({
-                name: "🆔 מזהה הצעה",
-                value: `\`${suggestionId}\``
+
+                name:
+                    "🆔 מזהה",
+
+                value:
+                    `\`${suggestionId}\``
             });
 
             const row =
@@ -1159,8 +1820,12 @@ client.on(
                             .setCustomId(
                                 `suggestion_accept_${suggestionId}`
                             )
-                            .setLabel("אישור")
-                            .setEmoji("✅")
+                            .setLabel(
+                                "אישור"
+                            )
+                            .setEmoji(
+                                "✅"
+                            )
                             .setStyle(
                                 ButtonStyle.Primary
                             ),
@@ -1169,16 +1834,38 @@ client.on(
                             .setCustomId(
                                 `suggestion_reject_${suggestionId}`
                             )
-                            .setLabel("דחייה")
-                            .setEmoji("❌")
+                            .setLabel(
+                                "דחייה"
+                            )
+                            .setEmoji(
+                                "❌"
+                            )
                             .setStyle(
                                 ButtonStyle.Danger
                             )
                     );
 
+            // =================================================
+            // 📢 תיוג Staff Role
+            // =================================================
+
+            const roleMention =
+                config.suggestionRole
+                    ? `<@&${config.suggestionRole}>`
+                    : "";
+
             await staffChannel.send({
-                embeds: [embed],
-                components: [row]
+
+                content:
+                    roleMention,
+
+                embeds: [
+                    embed
+                ],
+
+                components: [
+                    row
+                ]
             });
 
             await message.reply(
@@ -1187,11 +1874,53 @@ client.on(
 
             await sendLog(
                 guild,
-                "💡 הצעה חדשה",
+                "💡 הצעה נשלחה",
                 `**משתמש:** ${message.author.tag}\n`
-                + `**ID:** ${message.author.id}\n`
                 + `**הצעה:** ${cleanMentions(suggestion)}`
             );
+
+            return;
+        }
+
+        // ====================================================
+        // 🤖 AI ROOM
+        // ====================================================
+
+        if (
+            config.aiChannel &&
+            message.channel.id ===
+                config.aiChannel &&
+            config.aiEnabled
+        ) {
+
+            const answer =
+                await askGemini(
+                    message.content,
+                    []
+                );
+
+            if (!answer) {
+
+                await message.reply(
+                    "❌ ה-AI לא הצליח לענות כרגע."
+                );
+
+                return;
+            }
+
+            const chunks =
+                splitMessage(
+                    answer
+                );
+
+            for (
+                const chunk of chunks
+            ) {
+
+                await message.channel.send(
+                    chunk
+                );
+            }
 
             return;
         }
@@ -1209,94 +1938,68 @@ client.on(
             return;
         }
 
-        // אם צוות לקח - AI מפסיק
-        if (ticket.claimed) {
+        // אחרי Claim ה-AI מפסיק
+        if (
+            ticket.claimed
+        ) {
             return;
         }
 
-        if (!config.aiEnabled) {
+        if (
+            !config.aiEnabled
+        ) {
             return;
         }
 
-        // שומרים היסטוריה בתוך הטיקט
-        if (!ticket.aiHistory) {
-            ticket.aiHistory = [];
+        if (
+            !ticket.aiHistory
+        ) {
+
+            ticket.aiHistory =
+                [];
         }
 
         const answer =
             await askGemini(
                 message.content,
-                ticket.aiHistory.slice(-20)
+                ticket.aiHistory
             );
 
         if (!answer) {
             return;
         }
 
-        // שמירת שיחה
         ticket.aiHistory.push({
-            role: "user",
-            text: message.content
+
+            role:
+                "user",
+
+            text:
+                message.content
         });
 
         ticket.aiHistory.push({
-            role: "model",
-            text: answer
+
+            role:
+                "model",
+
+            text:
+                answer
         });
 
-        saveData();
+        await saveGuildData(
+            guild.id,
+            config
+        );
 
-        // ====================================================
-        // 🤖 הודעה רגילה - בלי Embed
-        // ====================================================
-
-        // Discord מגביל הודעה ל-2000 תווים.
-        // לכן אם Gemini מחזיר תשובה ארוכה,
-        // אנחנו מחלקים אותה לחלקים בלי לקצר.
-        const chunks = [];
-
-        let remaining = answer;
-
-        while (remaining.length > 0) {
-
-            if (remaining.length <= 1900) {
-
-                chunks.push(remaining);
-                break;
-            }
-
-            let cut =
-                remaining.lastIndexOf(
-                    "\n",
-                    1900
-                );
-
-            if (cut < 500) {
-
-                cut =
-                    remaining.lastIndexOf(
-                        " ",
-                        1900
-                    );
-            }
-
-            if (cut < 1) {
-                cut = 1900;
-            }
-
-            chunks.push(
-                remaining.slice(
-                    0,
-                    cut
-                )
+        const chunks =
+            splitMessage(
+                answer
             );
 
-            remaining =
-                remaining.slice(cut)
-                    .trimStart();
-        }
-
-        for (const chunk of chunks) {
+        for (
+            const chunk of chunks
+        ) {
 
             await message.channel.send(
                 chunk
@@ -1306,7 +2009,7 @@ client.on(
 );
 
 // ============================================================
-// 🔘 INTERACTIONS
+// 🔘 INTERACTION CREATE
 // ============================================================
 
 client.on(
@@ -1341,7 +2044,7 @@ client.on(
                 interaction.isStringSelectMenu()
             ) {
 
-                await handleSelectMenu(
+                await handleSelect(
                     interaction
                 );
 
@@ -1374,17 +2077,23 @@ client.on(
                 ) {
 
                     await interaction.followUp({
+
                         content:
                             "❌ אירעה שגיאה.",
-                        ephemeral: true
+
+                        ephemeral:
+                            true
                     });
 
                 } else {
 
                     await interaction.reply({
+
                         content:
                             "❌ אירעה שגיאה.",
-                        ephemeral: true
+
+                        ephemeral:
+                            true
                     });
                 }
 
@@ -1394,28 +2103,33 @@ client.on(
 );
 
 // ============================================================
-// 🎫 SELECT MENU
+// 📋 SELECT MENUS
 // ============================================================
 
-async function handleSelectMenu(
+async function handleSelect(
     interaction
 ) {
+
+    // ========================================================
+    // 🎫 TICKET TYPE
+    // ========================================================
 
     if (
         interaction.customId ===
         "ticket_type"
     ) {
 
-        const type =
-            interaction.values[0];
-
         await createTicket(
             interaction,
-            type
+            interaction.values[0]
         );
 
         return;
     }
+
+    // ========================================================
+    // 👥 ADD STAFF
+    // ========================================================
 
     if (
         interaction.customId
@@ -1424,7 +2138,7 @@ async function handleSelectMenu(
             )
     ) {
 
-        const ticketChannelId =
+        const channelId =
             interaction.customId.replace(
                 "ticket_add_staff_select_",
                 ""
@@ -1434,105 +2148,139 @@ async function handleSelectMenu(
             interaction.guild;
 
         const config =
-            getGuildData(guild.id);
+            await getGuildData(
+                guild.id
+            );
 
         const ticket =
             config.tickets[
-                ticketChannelId
+                channelId
             ];
 
         if (!ticket) {
 
             return interaction.reply({
+
                 content:
                     "❌ הטיקט לא נמצא.",
-                ephemeral: true
+
+                ephemeral:
+                    true
             });
         }
 
-        if (!isStaff(interaction.member)) {
+        if (
+            !(await isStaffMember(
+                interaction.member
+            ))
+        ) {
 
             return interaction.reply({
+
                 content:
-                    "❌ רק צוות יכול להוסיף צוות לטיקט.",
-                ephemeral: true
+                    "❌ רק צוות יכול להוסיף צוות.",
+
+                ephemeral:
+                    true
             });
         }
 
-        const selectedId =
+        const userId =
             interaction.values[0];
 
-        const selectedMember =
+        const member =
             await guild.members.fetch(
-                selectedId
-            ).catch(() => null);
+                userId
+            ).catch(
+                () => null
+            );
 
-        if (!selectedMember) {
+        if (!member) {
 
             return interaction.reply({
+
                 content:
-                    "❌ איש הצוות לא נמצא.",
-                ephemeral: true
+                    "❌ המשתמש לא נמצא.",
+
+                ephemeral:
+                    true
             });
         }
 
         if (
             !ticket.addedStaff
         ) {
-            ticket.addedStaff = [];
+
+            ticket.addedStaff =
+                [];
         }
 
         if (
             !ticket.addedStaff.includes(
-                selectedId
+                member.id
             )
         ) {
 
             ticket.addedStaff.push(
-                selectedId
+                member.id
             );
         }
 
         const channel =
             guild.channels.cache.get(
-                ticketChannelId
+                channelId
             );
 
         if (!channel) {
 
             return interaction.reply({
+
                 content:
                     "❌ חדר הטיקט לא נמצא.",
-                ephemeral: true
+
+                ephemeral:
+                    true
             });
         }
 
         await channel.permissionOverwrites.edit(
-            selectedMember.id,
+            member.id,
             {
-                ViewChannel: true,
-                SendMessages: true,
-                ReadMessageHistory: true
+
+                ViewChannel:
+                    true,
+
+                SendMessages:
+                    true,
+
+                ReadMessageHistory:
+                    true
             }
         );
 
-        saveData();
+        await saveGuildData(
+            guild.id,
+            config
+        );
 
         await interaction.reply({
+
             content:
-                `✅ ${selectedMember} נוסף לטיקט בהצלחה.`,
-            ephemeral: true
+                `✅ ${member} נוסף לטיקט.`,
+
+            ephemeral:
+                true
         });
 
         await channel.send(
-            `👥 ${interaction.user} הוסיף את ${selectedMember} לצוות הטיקט.`
+            `👥 ${interaction.user} הוסיף את ${member} לטיקט.`
         );
 
         await sendLog(
             guild,
-            "👥 איש צוות נוסף לטיקט",
-            `**צוות שהוסיף:** ${interaction.user.tag}\n`
-            + `**צוות שנוסף:** ${selectedMember.user.tag}\n`
+            "👥 צוות נוסף לטיקט",
+            `**הוסיף:** ${interaction.user.tag}\n`
+            + `**נוסף:** ${member.user.tag}\n`
             + `**טיקט:** ${channel}`
         );
 
@@ -1556,23 +2304,31 @@ async function handleButton(
     }
 
     const config =
-        getGuildData(guild.id);
+        await getGuildData(
+            guild.id
+        );
 
     const id =
         interaction.customId;
 
     // ========================================================
-    // VERIFY
+    // 🔐 VERIFY
     // ========================================================
 
-    if (id === "verify_member") {
+    if (
+        id ===
+        "verify_member"
+    ) {
 
         if (!config.verifyRole) {
 
             return interaction.reply({
+
                 content:
-                    "❌ רול האימות עדיין לא הוגדר.",
-                ephemeral: true
+                    "❌ רול האימות לא הוגדר.",
+
+                ephemeral:
+                    true
             });
         }
 
@@ -1584,9 +2340,12 @@ async function handleButton(
         if (!role) {
 
             return interaction.reply({
+
                 content:
                     "❌ רול האימות לא נמצא.",
-                ephemeral: true
+
+                ephemeral:
+                    true
             });
         }
 
@@ -1597,44 +2356,75 @@ async function handleButton(
         ) {
 
             return interaction.reply({
+
                 content:
                     "ℹ️ אתה כבר מאומת.",
-                ephemeral: true
+
+                ephemeral:
+                    true
             });
         }
 
-        await interaction.member.roles.add(
-            role
-        );
+        try {
 
-        await interaction.reply({
-            content:
-                "✅ אומתת בהצלחה! ברוך הבא ל־ChillZone 💙",
-            ephemeral: true
-        });
+            await interaction.member.roles.add(
+                role
+            );
 
-        await sendLog(
-            guild,
-            "🔐 משתמש אומת",
-            `**משתמש:** ${interaction.user.tag}\n`
-            + `**ID:** ${interaction.user.id}`
-        );
+            await interaction.reply({
+
+                content:
+                    "✅ אומתת בהצלחה! ברוך הבא ל־ChillZone 💙",
+
+                ephemeral:
+                    true
+            });
+
+            await sendLog(
+                guild,
+                "🔐 משתמש אומת",
+                `**משתמש:** ${interaction.user.tag}\n`
+                + `**ID:** ${interaction.user.id}\n`
+                + `**רול:** ${role.name}`
+            );
+
+        } catch {
+
+            await interaction.reply({
+
+                content:
+                    "❌ לא הצלחתי לתת לך את רול האימות. ודא שרול הבוט נמצא מעל רול האימות.",
+
+                ephemeral:
+                    true
+            });
+        }
 
         return;
     }
 
     // ========================================================
-    // CLAIM TICKET
+    // 🎫 CLAIM
     // ========================================================
 
-    if (id === "ticket_claim") {
+    if (
+        id ===
+        "ticket_claim"
+    ) {
 
-        if (!isStaff(interaction.member)) {
+        if (
+            !(await isStaffMember(
+                interaction.member
+            ))
+        ) {
 
             return interaction.reply({
+
                 content:
                     "❌ רק צוות יכול לקחת טיקט.",
-                ephemeral: true
+
+                ephemeral:
+                    true
             });
         }
 
@@ -1646,61 +2436,144 @@ async function handleButton(
         if (!ticket) {
 
             return interaction.reply({
+
                 content:
                     "❌ הטיקט לא נמצא.",
-                ephemeral: true
+
+                ephemeral:
+                    true
             });
         }
 
-        // אם כבר נלקח
-        if (ticket.claimed) {
+        if (
+            ticket.claimed
+        ) {
 
             return interaction.reply({
+
                 content:
                     `❌ הטיקט כבר נלקח על ידי <@${ticket.claimedBy}>.`,
-                ephemeral: true
+
+                ephemeral:
+                    true
             });
         }
 
-        ticket.claimed = true;
+        ticket.claimed =
+            true;
+
         ticket.claimedBy =
             interaction.user.id;
 
-        saveData();
-
-        // נותנים גישה לצוות שלקח
-        await interaction.channel.permissionOverwrites.edit(
-            interaction.user.id,
-            {
-                ViewChannel: true,
-                SendMessages: true,
-                ReadMessageHistory: true
-            }
+        await saveGuildData(
+            guild.id,
+            config
         );
 
-        const row =
-            createTicketButtons(true);
+        // ================================================
+        // 🚫 Staff Role no longer sees ticket
+        // ================================================
+
+        if (
+            config.staffRole
+        ) {
+
+            await interaction.channel
+                .permissionOverwrites.edit(
+                    config.staffRole,
+                    {
+
+                        ViewChannel:
+                            false,
+
+                        SendMessages:
+                            false,
+
+                        ReadMessageHistory:
+                            false
+                    }
+                );
+        }
+
+        // ================================================
+        // 🙋 Claimant gets access
+        // ================================================
+
+        await interaction.channel
+            .permissionOverwrites.edit(
+                interaction.user.id,
+                {
+
+                    ViewChannel:
+                        true,
+
+                    SendMessages:
+                        true,
+
+                    ReadMessageHistory:
+                        true
+                }
+            );
+
+        // ================================================
+        // 👥 Previously added staff
+        // ================================================
+
+        for (
+            const staffId of
+                ticket.addedStaff || []
+        ) {
+
+            await interaction.channel
+                .permissionOverwrites.edit(
+                    staffId,
+                    {
+
+                        ViewChannel:
+                            true,
+
+                        SendMessages:
+                            true,
+
+                        ReadMessageHistory:
+                            true
+                    }
+                )
+                .catch(
+                    () => {}
+                );
+        }
+
+        // ================================================
+        // 🔘 Disable claim button
+        // ================================================
 
         await interaction.message.edit({
-            components: [row]
+
+            components: [
+                createTicketButtons(true)
+            ]
         });
 
         await interaction.reply({
+
             content:
                 "🙋 לקחת את הטיקט בהצלחה.",
-            ephemeral: true
+
+            ephemeral:
+                true
         });
 
         await interaction.channel.send(
             `🙋 **${interaction.user} לקח את הטיקט.**\n`
-            + `מעכשיו רק פותח הטיקט, הצוות שלקח אותו ואנשי צוות שנוספו דרך **הוסף צוות** יכולים לדבר כאן.`
+            + `🤖 ה-AI הפסיק לענות בטיקט הזה.\n`
+            + `👥 כדי להוסיף איש צוות נוסף, השתמש בכפתור **הוסף צוות**.`
         );
 
         await sendLog(
             guild,
             "🙋 טיקט נלקח",
             `**צוות:** ${interaction.user.tag}\n`
-            + `**ID:** ${interaction.user.id}\n`
             + `**טיקט:** ${interaction.channel.name}`
         );
 
@@ -1708,17 +2581,27 @@ async function handleButton(
     }
 
     // ========================================================
-    // ADD STAFF
+    // 👥 ADD STAFF
     // ========================================================
 
-    if (id === "ticket_add_staff") {
+    if (
+        id ===
+        "ticket_add_staff"
+    ) {
 
-        if (!isStaff(interaction.member)) {
+        if (
+            !(await isStaffMember(
+                interaction.member
+            ))
+        ) {
 
             return interaction.reply({
+
                 content:
-                    "❌ רק צוות יכול להוסיף אנשי צוות.",
-                ephemeral: true
+                    "❌ רק צוות יכול להוסיף צוות.",
+
+                ephemeral:
+                    true
             });
         }
 
@@ -1730,71 +2613,30 @@ async function handleButton(
         if (!ticket) {
 
             return interaction.reply({
+
                 content:
                     "❌ הטיקט לא נמצא.",
-                ephemeral: true
+
+                ephemeral:
+                    true
             });
         }
 
-        const staffMembers =
-            await getStaffMembers(
-                guild
-            );
-
-        if (!staffMembers.length) {
-
-            return interaction.reply({
-                content:
-                    "❌ לא נמצאו אנשי צוות עם הרול שהוגדר.",
-                ephemeral: true
-            });
-        }
-
-        const options =
-            staffMembers.map(member =>
-                new StringSelectMenuOptionBuilder()
-                    .setLabel(
-                        member.user.username
-                            .slice(0, 100)
-                    )
-                    .setDescription(
-                        `ID: ${member.id}`
-                    )
-                    .setValue(
-                        member.id
-                    )
-            );
-
-        const menu =
-            new StringSelectMenuBuilder()
-                .setCustomId(
-                    `ticket_add_staff_select_${interaction.channel.id}`
-                )
-                .setPlaceholder(
-                    "👥 בחר איש צוות להוספה"
-                )
-                .addOptions(options);
-
-        const row =
-            new ActionRowBuilder()
-                .addComponents(menu);
-
-        await interaction.reply({
-            content:
-                "👥 **הוסף צוות לטיקט**\n\n"
-                + "בחר למטה את איש הצוות שיקבל גישה לטיקט:",
-            components: [row],
-            ephemeral: true
-        });
+        await showStaffSelector(
+            interaction
+        );
 
         return;
     }
 
     // ========================================================
-    // CLOSE TICKET
+    // 🔒 CLOSE
     // ========================================================
 
-    if (id === "ticket_close") {
+    if (
+        id ===
+        "ticket_close"
+    ) {
 
         const ticket =
             config.tickets[
@@ -1804,55 +2646,68 @@ async function handleButton(
         if (!ticket) {
 
             return interaction.reply({
+
                 content:
                     "❌ הטיקט לא נמצא.",
-                ephemeral: true
+
+                ephemeral:
+                    true
             });
         }
 
-        const canClose =
-            ticket.userId === interaction.user.id ||
-            isStaff(interaction.member);
+        const allowed =
+            ticket.userId ===
+                interaction.user.id ||
+            await isStaffMember(
+                interaction.member
+            );
 
-        if (!canClose) {
+        if (!allowed) {
 
             return interaction.reply({
+
                 content:
                     "❌ אין לך הרשאה לסגור את הטיקט.",
-                ephemeral: true
+
+                ephemeral:
+                    true
             });
         }
 
-        await interaction.reply({
-            content:
-                "🔒 הטיקט ייסגר בעוד 5 שניות..."
-        });
+        await interaction.reply(
+            "🔒 הטיקט ייסגר בעוד 5 שניות..."
+        );
 
         await sendLog(
             guild,
             "🔒 טיקט נסגר",
             `**על ידי:** ${interaction.user.tag}\n`
-            + `**ID:** ${interaction.user.id}\n`
-            + `**חדר:** ${interaction.channel.name}`
+            + `**טיקט:** ${interaction.channel.name}`
         );
 
         setTimeout(
             async () => {
 
-                delete config.tickets[
+                const latest =
+                    await getGuildData(
+                        guild.id
+                    );
+
+                delete latest.tickets[
                     interaction.channel.id
                 ];
 
-                saveData();
+                await saveGuildData(
+                    guild.id,
+                    latest
+                );
 
-                try {
-                    await interaction.channel.delete();
-                } catch (error) {
-                    console.error(
-                        "Ticket delete error:",
-                        error
+                await interaction.channel
+                    .delete()
+                    .catch(
+                        () => {}
                     );
-                }
+
             },
             5000
         );
@@ -1861,73 +2716,123 @@ async function handleButton(
     }
 
     // ========================================================
-    // STAFF PANEL
+    // 🛡️ STAFF MODERATION
     // ========================================================
 
     if (
-        id === "staff_timeout" ||
-        id === "staff_ban" ||
-        id === "staff_kick" ||
-        id === "staff_mute"
+        [
+            "staff_timeout",
+            "staff_ban",
+            "staff_kick",
+            "staff_mute"
+        ].includes(id)
     ) {
 
-        if (!isStaff(interaction.member)) {
+        if (
+            !(await isStaffMember(
+                interaction.member
+            ))
+        ) {
 
             return interaction.reply({
+
                 content:
-                    "❌ רק צוות יכול להשתמש בפאנל הזה.",
-                ephemeral: true
+                    "❌ רק צוות יכול להשתמש בפאנל.",
+
+                ephemeral:
+                    true
             });
         }
 
         let modalId;
         let title;
 
-        if (id === "staff_timeout") {
-            modalId = "modal_timeout";
-            title = "⏱️ Timeout";
+        if (
+            id ===
+            "staff_timeout"
+        ) {
+
+            modalId =
+                "modal_timeout";
+
+            title =
+                "⏱️ Timeout";
         }
 
-        if (id === "staff_ban") {
-            modalId = "modal_ban";
-            title = "🔨 Ban";
+        if (
+            id ===
+            "staff_ban"
+        ) {
+
+            modalId =
+                "modal_ban";
+
+            title =
+                "🔨 Ban";
         }
 
-        if (id === "staff_kick") {
-            modalId = "modal_kick";
-            title = "👢 Kick";
+        if (
+            id ===
+            "staff_kick"
+        ) {
+
+            modalId =
+                "modal_kick";
+
+            title =
+                "👢 Kick";
         }
 
-        if (id === "staff_mute") {
-            modalId = "modal_mute";
-            title = "🔇 השתקה";
+        if (
+            id ===
+            "staff_mute"
+        ) {
+
+            modalId =
+                "modal_mute";
+
+            title =
+                "🔇 Mute";
         }
 
         const modal =
             new ModalBuilder()
-                .setCustomId(modalId)
-                .setTitle(title);
+                .setCustomId(
+                    modalId
+                )
+                .setTitle(
+                    title
+                );
 
-        const userIdInput =
+        const userInput =
             new TextInputBuilder()
-                .setCustomId("user_id")
-                .setLabel("ID של המשתמש")
+                .setCustomId(
+                    "user_id"
+                )
+                .setLabel(
+                    "Discord User ID"
+                )
                 .setPlaceholder(
-                    "הכנס Discord User ID"
+                    "לדוגמה: 123456789012345678"
                 )
                 .setStyle(
                     TextInputStyle.Short
                 )
-                .setRequired(true);
+                .setRequired(
+                    true
+                );
 
         modal.addComponents(
             new ActionRowBuilder()
                 .addComponents(
-                    userIdInput
+                    userInput
                 )
         );
 
-        if (id === "staff_timeout") {
+        if (
+            id ===
+            "staff_timeout"
+        ) {
 
             const timeInput =
                 new TextInputBuilder()
@@ -1935,7 +2840,7 @@ async function handleButton(
                         "minutes"
                     )
                     .setLabel(
-                        "לכמה דקות?"
+                        "כמה דקות?"
                     )
                     .setPlaceholder(
                         "לדוגמה: 10"
@@ -1943,7 +2848,9 @@ async function handleButton(
                     .setStyle(
                         TextInputStyle.Short
                     )
-                    .setRequired(true);
+                    .setRequired(
+                        true
+                    );
 
             modal.addComponents(
                 new ActionRowBuilder()
@@ -1961,7 +2868,7 @@ async function handleButton(
     }
 
     // ========================================================
-    // SUGGESTION ACCEPT / REJECT
+    // 💡 SUGGESTION DECISION
     // ========================================================
 
     if (
@@ -1973,12 +2880,19 @@ async function handleButton(
         )
     ) {
 
-        if (!isStaff(interaction.member)) {
+        if (
+            !(await isStaffMember(
+                interaction.member
+            ))
+        ) {
 
             return interaction.reply({
+
                 content:
-                    "❌ רק צוות יכול לאשר או לדחות הצעה.",
-                ephemeral: true
+                    "❌ רק צוות יכול להחליט על הצעה.",
+
+                ephemeral:
+                    true
             });
         }
 
@@ -2005,82 +2919,134 @@ async function handleButton(
         if (!suggestion) {
 
             return interaction.reply({
+
                 content:
                     "❌ ההצעה לא נמצאה.",
-                ephemeral: true
+
+                ephemeral:
+                    true
             });
         }
 
-        if (suggestion.decided) {
+        if (
+            suggestion.decided
+        ) {
 
             return interaction.reply({
+
                 content:
                     "❌ ההצעה כבר קיבלה החלטה.",
-                ephemeral: true
+
+                ephemeral:
+                    true
             });
         }
 
-        suggestion.decided = true;
-        suggestion.accepted = accepted;
+        suggestion.decided =
+            true;
+
+        suggestion.accepted =
+            accepted;
+
         suggestion.decidedBy =
             interaction.user.id;
 
-        saveData();
+        await saveGuildData(
+            guild.id,
+            config
+        );
+
+        // ================================================
+        // 📩 DM
+        // ================================================
 
         const user =
             await client.users.fetch(
                 suggestion.userId
-            ).catch(() => null);
+            ).catch(
+                () => null
+            );
 
         if (user) {
 
             const dmEmbed =
                 makeEmbed(
+
                     guild,
+
                     accepted
                         ? "✅ ההצעה שלך אושרה!"
                         : "❌ ההצעה שלך נדחתה",
+
                     accepted
-                        ? "צוות ChillZone בדק את ההצעה שלך ואישר אותה! 💙"
+
+                        ? "צוות ChillZone בדק את ההצעה שלך ואישר אותה 💙"
+
                         : "צוות ChillZone בדק את ההצעה שלך והחליט שלא לאשר אותה הפעם."
                 );
 
             dmEmbed.addFields({
-                name: "💡 ההצעה שלך",
+
+                name:
+                    "💡 ההצעה שלך",
+
                 value:
-                    cleanMentions(
-                        suggestion.content
-                    ).slice(0, 1000)
+                    clip(
+                        cleanMentions(
+                            suggestion.content
+                        ),
+                        1000
+                    )
             });
 
             await user.send({
-                embeds: [dmEmbed]
-            }).catch(() => {});
+
+                embeds: [
+                    dmEmbed
+                ]
+
+            }).catch(
+                () => {}
+            );
         }
+
+        // ================================================
+        // UPDATE STAFF MESSAGE
+        // ================================================
 
         const resultEmbed =
             makeEmbed(
+
                 guild,
+
                 accepted
                     ? "✅ הצעה אושרה"
                     : "❌ הצעה נדחתה",
+
                 `**מאת:** <@${suggestion.userId}>\n\n`
-                + `**ההצעה:**\n${cleanMentions(suggestion.content)}\n\n`
+                + `**הצעה:**\n${cleanMentions(suggestion.content)}\n\n`
                 + `**החלטה:** ${accepted ? "אושרה ✅" : "נדחתה ❌"}\n`
                 + `**על ידי:** ${interaction.user}`
             );
 
         await interaction.message.edit({
-            embeds: [resultEmbed],
+
+            embeds: [
+                resultEmbed
+            ],
+
             components: []
         });
 
         await interaction.reply({
+
             content:
                 accepted
-                    ? "✅ ההצעה אושרה והמשתמש קיבל הודעה פרטית."
-                    : "❌ ההצעה נדחתה והמשתמש קיבל הודעה פרטית.",
-            ephemeral: true
+                    ? "✅ ההצעה אושרה והמשתמש קיבל DM."
+                    : "❌ ההצעה נדחתה והמשתמש קיבל DM.",
+
+            ephemeral:
+                true
         });
 
         await sendLog(
@@ -2108,15 +3074,17 @@ async function sendStaffPanel(
 
     const embed =
         makeEmbed(
+
             guild,
-            "🛡️ פאנל צוות — ChillZone",
-            "ברוכים הבאים לפאנל הצוות.\n\n"
-            + "כאן ניתן לבצע פעולות ניהול על משתמשים.\n\n"
-            + "⏱️ **Timeout** — הכנסת משתמש להשתקה זמנית.\n"
-            + "🔨 **Ban** — הרחקת משתמש מהשרת.\n"
-            + "👢 **Kick** — הוצאת משתמש מהשרת.\n"
-            + "🔇 **השתקה** — הוספה/הסרה של Mute Role.\n\n"
-            + "לאחר לחיצה על פעולה, הבוט יבקש ממך את **ID של המשתמש**."
+
+            "🛡️ פאנל צוות",
+
+            "פאנל ניהול ChillZone 💙\n\n"
+            + "⏱️ **Timeout** — השתקה זמנית\n"
+            + "🔨 **Ban** — הרחקת משתמש\n"
+            + "👢 **Kick** — הוצאת משתמש\n"
+            + "🔇 **Mute** — הוספה/הסרה של Mute Role\n\n"
+            + "כל פעולה תבקש Discord User ID."
         );
 
     const row =
@@ -2130,7 +3098,9 @@ async function sendStaffPanel(
                     .setLabel(
                         "Timeout"
                     )
-                    .setEmoji("⏱️")
+                    .setEmoji(
+                        "⏱️"
+                    )
                     .setStyle(
                         ButtonStyle.Primary
                     ),
@@ -2142,7 +3112,9 @@ async function sendStaffPanel(
                     .setLabel(
                         "Ban"
                     )
-                    .setEmoji("🔨")
+                    .setEmoji(
+                        "🔨"
+                    )
                     .setStyle(
                         ButtonStyle.Danger
                     ),
@@ -2154,7 +3126,9 @@ async function sendStaffPanel(
                     .setLabel(
                         "Kick"
                     )
-                    .setEmoji("👢")
+                    .setEmoji(
+                        "👢"
+                    )
                     .setStyle(
                         ButtonStyle.Secondary
                     ),
@@ -2164,18 +3138,22 @@ async function sendStaffPanel(
                         "staff_mute"
                     )
                     .setLabel(
-                        "השתקה"
+                        "Mute"
                     )
-                    .setEmoji("🔇")
+                    .setEmoji(
+                        "🔇"
+                    )
                     .setStyle(
                         ButtonStyle.Primary
                     )
             );
 
     await channel.send({
+
         embeds: [
             embed
         ],
+
         components: [
             row
         ]
@@ -2192,26 +3170,32 @@ async function sendLinksPanel(
 ) {
 
     const config =
-        getGuildData(guild.id);
+        await getGuildData(
+            guild.id
+        );
 
     const embed =
         makeEmbed(
+
             guild,
+
             "🔗 הקישורים של ChillZone",
-            "כל הקישורים החשובים נמצאים כאן.\n"
-            + "לחץ על הכפתור הרצוי כדי לפתוח אותו."
+
+            "כל הקישורים החשובים במקום אחד 💙"
         );
 
-    if (!config.links.length) {
+    if (
+        !config.links.length
+    ) {
 
         embed.setDescription(
-            "❌ עדיין לא הוגדרו קישורים.\n\n"
-            + "אדמין יכול להוסיף קישור עם:\n"
-            + "`/הוסף-קישור`"
+            "❌ עדיין לא הוגדרו קישורים."
         );
 
         await channel.send({
-            embeds: [embed]
+            embeds: [
+                embed
+            ]
         });
 
         return;
@@ -2234,7 +3218,10 @@ async function sendLinksPanel(
         const button =
             new ButtonBuilder()
                 .setLabel(
-                    link.name.slice(0, 80)
+                    clip(
+                        link.name,
+                        80
+                    )
                 )
                 .setURL(
                     link.url
@@ -2249,18 +3236,27 @@ async function sendLinksPanel(
 
         if (
             row.components.length === 5 ||
-            i === config.links.length - 1
+            i ===
+                config.links.length - 1
         ) {
 
-            rows.push(row);
+            rows.push(
+                row
+            );
+
             row =
                 new ActionRowBuilder();
         }
     }
 
     await channel.send({
-        embeds: [embed],
-        components: rows
+
+        embeds: [
+            embed
+        ],
+
+        components:
+            rows
     });
 }
 
@@ -2280,29 +3276,52 @@ async function handleCommand(
     }
 
     const config =
-        getGuildData(guild.id);
+        await getGuildData(
+            guild.id
+        );
 
     const adminCommands = [
 
         "setup",
-        "הגדר-תמונה",
-        "הגדר-לוגים",
-        "הגדר-צוות",
-        "הגדר-השתקה",
-        "הגדר-קטגוריה-טיקטים",
-        "הגדר-טיקטים",
-        "פאנל-טיקטים",
-        "פאנל-צוות",
-        "הגדר-אימות",
-        "פאנל-אימות",
-        "הגדר-ברוכים-הבאים",
-        "הגדר-הצעות",
-        "הגדר-חדר-קישורים",
-        "הוסף-קישור",
-        "מחק-קישורים",
-        "פאנל-קישורים",
-        "הגדר-ספירה",
-        "איפוס-ספירה"
+
+        "set-image",
+
+        "set-logs",
+
+        "set-staff",
+
+        "set-mute",
+
+        "set-ai",
+
+        "set-ticket-category",
+
+        "set-ticket-channel",
+
+        "ticket-panel",
+
+        "staff-panel",
+
+        "set-verify",
+
+        "verify-panel",
+
+        "set-welcome",
+
+        "set-suggestions",
+
+        "set-links",
+
+        "add-link",
+
+        "clear-links",
+
+        "links-panel",
+
+        "set-counting",
+
+        "reset-counting"
+
     ];
 
     if (
@@ -2318,9 +3337,12 @@ async function handleCommand(
         ) {
 
             return interaction.reply({
+
                 content:
                     "❌ רק Administrator יכול להשתמש בפקודה הזאת.",
-                ephemeral: true
+
+                ephemeral:
+                    true
             });
         }
     }
@@ -2336,54 +3358,68 @@ async function handleCommand(
 
         const embed =
             makeEmbed(
+
                 guild,
+
                 "⚙️ ChillZone Setup",
-                "**📝 הגדרות בסיס:**\n"
-                + "`/הגדר-תמונה` — תמונת הבוט\n"
-                + "`/הגדר-לוגים` — חדר לוגים\n"
-                + "`/הגדר-צוות` — Staff Role\n"
-                + "`/הגדר-השתקה` — Mute Role\n\n"
+
+                "**🔵 בסיס:**\n"
+                + "`/set-image` — תמונת הבוט\n"
+                + "`/set-logs` — לוגים\n"
+                + "`/set-staff` — Staff Role\n"
+                + "`/set-mute` — Mute Role\n"
+                + "`/set-ai` — חדר AI\n\n"
 
                 + "**🎫 טיקטים:**\n"
-                + "`/הגדר-קטגוריה-טיקטים` — קטגוריית טיקטים\n"
-                + "`/הגדר-טיקטים` — חדר פאנל\n"
-                + "`/פאנל-טיקטים` — שליחת הפאנל\n\n"
+                + "`/set-ticket-category`\n"
+                + "`/set-ticket-channel`\n"
+                + "`/ticket-panel`\n\n"
 
                 + "**🔐 אימות:**\n"
-                + "`/הגדר-אימות` — חדר + רול\n"
-                + "`/פאנל-אימות` — שליחת פאנל\n\n"
+                + "`/set-verify`\n"
+                + "`/verify-panel`\n\n"
 
                 + "**👋 Welcome:**\n"
-                + "`/הגדר-ברוכים-הבאים`\n\n"
+                + "`/set-welcome`\n\n"
 
                 + "**💡 הצעות:**\n"
-                + "`/הגדר-הצעות`\n"
-                + "משתמשים: `!הצעה הטקסט שלך`\n\n"
+                + "`/set-suggestions`\n"
+                + "`!הצעה הטקסט שלך`\n\n"
 
                 + "**🔗 קישורים:**\n"
-                + "`/הגדר-חדר-קישורים`\n"
-                + "`/הוסף-קישור`\n"
-                + "`/פאנל-קישורים`\n\n"
+                + "`/set-links`\n"
+                + "`/add-link`\n"
+                + "`/links-panel`\n\n"
 
                 + "**🛡️ צוות:**\n"
-                + "`/פאנל-צוות`"
+                + "`/staff-panel`\n"
+                + "`!cl 1-100`\n\n"
+
+                + "**🔢 ספירה:**\n"
+                + "`/set-counting`\n"
+                + "`/reset-counting`"
             );
 
         await interaction.reply({
-            embeds: [embed],
-            ephemeral: true
+
+            embeds: [
+                embed
+            ],
+
+            ephemeral:
+                true
         });
 
         return;
     }
 
     // ========================================================
-    // BOT IMAGE
+    // IMAGE
     // ========================================================
 
     if (
         interaction.commandName ===
-        "הגדר-תמונה"
+        "set-image"
     ) {
 
         const url =
@@ -2392,31 +3428,39 @@ async function handleCommand(
             );
 
         if (
-            !url.startsWith("http://") &&
-            !url.startsWith("https://")
+            !url.startsWith(
+                "http://"
+            ) &&
+            !url.startsWith(
+                "https://"
+            )
         ) {
 
             return interaction.reply({
+
                 content:
-                    "❌ הקישור חייב להיות URL תקין.",
-                ephemeral: true
+                    "❌ זה לא URL תקין.",
+
+                ephemeral:
+                    true
             });
         }
 
         config.botImage =
             url;
 
-        saveData();
+        await saveGuildData(
+            guild.id,
+            config
+        );
 
         await interaction.reply({
-            embeds: [
-                makeEmbed(
-                    guild,
-                    "🖼️ תמונת הבוט עודכנה",
-                    "התמונה נשמרה ותופיע בפאנלים של ChillZone."
-                )
-            ],
-            ephemeral: true
+
+            content:
+                "✅ תמונת הבוט נשמרה ב־PostgreSQL.",
+
+            ephemeral:
+                true
         });
 
         return;
@@ -2428,7 +3472,7 @@ async function handleCommand(
 
     if (
         interaction.commandName ===
-        "הגדר-לוגים"
+        "set-logs"
     ) {
 
         const channel =
@@ -2439,24 +3483,30 @@ async function handleCommand(
         config.logsChannel =
             channel.id;
 
-        saveData();
+        await saveGuildData(
+            guild.id,
+            config
+        );
 
         await interaction.reply({
+
             content:
-                `✅ חדר הלוגים הוגדר ל־${channel}.`,
-            ephemeral: true
+                `✅ חדר הלוגים: ${channel}`,
+
+            ephemeral:
+                true
         });
 
         return;
     }
 
     // ========================================================
-    // STAFF ROLE
+    // STAFF
     // ========================================================
 
     if (
         interaction.commandName ===
-        "הגדר-צוות"
+        "set-staff"
     ) {
 
         const role =
@@ -2467,24 +3517,30 @@ async function handleCommand(
         config.staffRole =
             role.id;
 
-        saveData();
+        await saveGuildData(
+            guild.id,
+            config
+        );
 
         await interaction.reply({
+
             content:
                 `✅ Staff Role הוגדר ל־${role}.`,
-            ephemeral: true
+
+            ephemeral:
+                true
         });
 
         return;
     }
 
     // ========================================================
-    // MUTE ROLE
+    // MUTE
     // ========================================================
 
     if (
         interaction.commandName ===
-        "הגדר-השתקה"
+        "set-mute"
     ) {
 
         const role =
@@ -2495,12 +3551,56 @@ async function handleCommand(
         config.muteRole =
             role.id;
 
-        saveData();
+        await saveGuildData(
+            guild.id,
+            config
+        );
 
         await interaction.reply({
+
             content:
                 `✅ Mute Role הוגדר ל־${role}.`,
-            ephemeral: true
+
+            ephemeral:
+                true
+        });
+
+        return;
+    }
+
+    // ========================================================
+    // AI ROOM
+    // ========================================================
+
+    if (
+        interaction.commandName ===
+        "set-ai"
+    ) {
+
+        const channel =
+            interaction.options.getChannel(
+                "channel"
+            );
+
+        config.aiChannel =
+            channel.id;
+
+        config.aiEnabled =
+            true;
+
+        await saveGuildData(
+            guild.id,
+            config
+        );
+
+        await interaction.reply({
+
+            content:
+                `🤖 חדר ה-AI הוגדר ל־${channel}.\n\n`
+                + "מעכשיו הבוט יענה שם בהודעות רגילות.",
+
+            ephemeral:
+                true
         });
 
         return;
@@ -2512,7 +3612,7 @@ async function handleCommand(
 
     if (
         interaction.commandName ===
-        "הגדר-קטגוריה-טיקטים"
+        "set-ticket-category"
     ) {
 
         const category =
@@ -2523,12 +3623,18 @@ async function handleCommand(
         config.ticketCategory =
             category.id;
 
-        saveData();
+        await saveGuildData(
+            guild.id,
+            config
+        );
 
         await interaction.reply({
+
             content:
-                `✅ קטגוריית הטיקטים הוגדרה ל־${category}.`,
-            ephemeral: true
+                `✅ קטגוריית הטיקטים: ${category}`,
+
+            ephemeral:
+                true
         });
 
         return;
@@ -2540,7 +3646,7 @@ async function handleCommand(
 
     if (
         interaction.commandName ===
-        "הגדר-טיקטים"
+        "set-ticket-channel"
     ) {
 
         const channel =
@@ -2551,47 +3657,69 @@ async function handleCommand(
         config.ticketChannel =
             channel.id;
 
-        saveData();
-
-        await interaction.reply({
-            content:
-                `✅ חדר פאנל הטיקטים הוגדר ל־${channel}.`,
-            ephemeral: true
-        });
-
-        return;
-    }
-
-    // ========================================================
-    // SEND TICKET PANEL
-    // ========================================================
-
-    if (
-        interaction.commandName ===
-        "פאנל-טיקטים"
-    ) {
-
-        await sendTicketPanel(
-            guild,
-            interaction.channel
+        await saveGuildData(
+            guild.id,
+            config
         );
 
         await interaction.reply({
+
             content:
-                "✅ פאנל הטיקטים נשלח.",
-            ephemeral: true
+                `✅ חדר הטיקטים: ${channel}`,
+
+            ephemeral:
+                true
         });
 
         return;
     }
 
     // ========================================================
-    // VERIFY CONFIG
+    // TICKET PANEL
     // ========================================================
 
     if (
         interaction.commandName ===
-        "הגדר-אימות"
+        "ticket-panel"
+    ) {
+
+        let channel =
+            interaction.channel;
+
+        if (
+            config.ticketChannel
+        ) {
+
+            channel =
+                guild.channels.cache.get(
+                    config.ticketChannel
+                ) || channel;
+        }
+
+        await sendTicketPanel(
+            guild,
+            channel
+        );
+
+        await interaction.reply({
+
+            content:
+                "✅ פאנל הטיקטים נשלח.",
+
+            ephemeral:
+                true
+        });
+
+        return;
+    }
+
+    // ========================================================
+    // VERIFY
+    // ========================================================
+
+    if (
+        interaction.commandName ===
+        "set-verify"
     ) {
 
         const channel =
@@ -2610,14 +3738,20 @@ async function handleCommand(
         config.verifyRole =
             role.id;
 
-        saveData();
+        await saveGuildData(
+            guild.id,
+            config
+        );
 
         await interaction.reply({
+
             content:
                 `✅ מערכת האימות הוגדרה.\n`
                 + `חדר: ${channel}\n`
                 + `רול: ${role}`,
-            ephemeral: true
+
+            ephemeral:
+                true
         });
 
         return;
@@ -2629,30 +3763,46 @@ async function handleCommand(
 
     if (
         interaction.commandName ===
-        "פאנל-אימות"
+        "verify-panel"
     ) {
+
+        let channel =
+            interaction.channel;
+
+        if (
+            config.verifyChannel
+        ) {
+
+            channel =
+                guild.channels.cache.get(
+                    config.verifyChannel
+                ) || channel;
+        }
 
         await sendVerifyPanel(
             guild,
-            interaction.channel
+            channel
         );
 
         await interaction.reply({
+
             content:
                 "✅ פאנל האימות נשלח.",
-            ephemeral: true
+
+            ephemeral:
+                true
         });
 
         return;
     }
 
     // ========================================================
-    // WELCOME CONFIG
+    // WELCOME
     // ========================================================
 
     if (
         interaction.commandName ===
-        "הגדר-ברוכים-הבאים"
+        "set-welcome"
     ) {
 
         const channel =
@@ -2663,24 +3813,30 @@ async function handleCommand(
         config.welcomeChannel =
             channel.id;
 
-        saveData();
+        await saveGuildData(
+            guild.id,
+            config
+        );
 
         await interaction.reply({
+
             content:
-                `✅ חדר ה־Welcome הוגדר ל־${channel}.`,
-            ephemeral: true
+                `✅ חדר Welcome: ${channel}`,
+
+            ephemeral:
+                true
         });
 
         return;
     }
 
     // ========================================================
-    // SUGGESTIONS CONFIG
+    // SUGGESTIONS
     // ========================================================
 
     if (
         interaction.commandName ===
-        "הגדר-הצעות"
+        "set-suggestions"
     ) {
 
         const channel =
@@ -2693,31 +3849,47 @@ async function handleCommand(
                 "staffchannel"
             );
 
+        const role =
+            interaction.options.getRole(
+                "role"
+            );
+
         config.suggestionChannel =
             channel.id;
 
         config.suggestionStaffChannel =
             staffChannel.id;
 
-        saveData();
+        config.suggestionRole =
+            role.id;
+
+        await saveGuildData(
+            guild.id,
+            config
+        );
 
         await interaction.reply({
+
             content:
-                `✅ חדר הצעות: ${channel}\n`
-                + `✅ חדר צוות: ${staffChannel}`,
-            ephemeral: true
+                `✅ מערכת ההצעות הוגדרה!\n\n`
+                + `💡 חדר הצעות: ${channel}\n`
+                + `🛡️ חדר צוות: ${staffChannel}\n`
+                + `🔔 רול שיתויג: ${role}`,
+
+            ephemeral:
+                true
         });
 
         return;
     }
 
     // ========================================================
-    // LINKS CHANNEL
+    // LINKS
     // ========================================================
 
     if (
         interaction.commandName ===
-        "הגדר-חדר-קישורים"
+        "set-links"
     ) {
 
         const channel =
@@ -2728,104 +3900,138 @@ async function handleCommand(
         config.linksChannel =
             channel.id;
 
-        saveData();
+        await saveGuildData(
+            guild.id,
+            config
+        );
 
         await interaction.reply({
+
             content:
-                `✅ חדר הקישורים הוגדר ל־${channel}.`,
-            ephemeral: true
+                `✅ חדר הקישורים: ${channel}`,
+
+            ephemeral:
+                true
         });
 
         return;
     }
 
-    // ========================================================
-    // ADD LINK
-    // ========================================================
-
     if (
         interaction.commandName ===
-        "הוסף-קישור"
+        "add-link"
     ) {
 
         const name =
             interaction.options.getString(
-                "שם"
+                "name"
             );
 
         const url =
             interaction.options.getString(
-                "קישור"
+                "url"
             );
 
         if (
-            !url.startsWith("https://") &&
-            !url.startsWith("http://")
+            !url.startsWith(
+                "https://"
+            ) &&
+            !url.startsWith(
+                "http://"
+            )
         ) {
 
             return interaction.reply({
+
                 content:
-                    "❌ הקישור חייב להתחיל ב־https:// או http://.",
-                ephemeral: true
+                    "❌ הקישור חייב להתחיל ב־https:// או http://",
+
+                ephemeral:
+                    true
             });
         }
 
         config.links.push({
-            name,
-            url
+
+            name:
+                name,
+
+            url:
+                url
         });
 
-        saveData();
-
-        await interaction.reply({
-            content:
-                `✅ הקישור **${name}** נוסף בהצלחה.`,
-            ephemeral: true
-        });
-
-        return;
-    }
-
-    // ========================================================
-    // DELETE LINKS
-    // ========================================================
-
-    if (
-        interaction.commandName ===
-        "מחק-קישורים"
-    ) {
-
-        config.links = [];
-
-        saveData();
-
-        await interaction.reply({
-            content:
-                "✅ כל הקישורים נמחקו.",
-            ephemeral: true
-        });
-
-        return;
-    }
-
-    // ========================================================
-    // LINKS PANEL
-    // ========================================================
-
-    if (
-        interaction.commandName ===
-        "פאנל-קישורים"
-    ) {
-
-        await sendLinksPanel(
-            guild,
-            interaction.channel
+        await saveGuildData(
+            guild.id,
+            config
         );
 
         await interaction.reply({
+
+            content:
+                `✅ הקישור **${name}** נוסף.`,
+
+            ephemeral:
+                true
+        });
+
+        return;
+    }
+
+    if (
+        interaction.commandName ===
+        "clear-links"
+    ) {
+
+        config.links =
+            [];
+
+        await saveGuildData(
+            guild.id,
+            config
+        );
+
+        await interaction.reply({
+
+            content:
+                "✅ כל הקישורים נמחקו.",
+
+            ephemeral:
+                true
+        });
+
+        return;
+    }
+
+    if (
+        interaction.commandName ===
+        "links-panel"
+    ) {
+
+        let channel =
+            interaction.channel;
+
+        if (
+            config.linksChannel
+        ) {
+
+            channel =
+                guild.channels.cache.get(
+                    config.linksChannel
+                ) || channel;
+        }
+
+        await sendLinksPanel(
+            guild,
+            channel
+        );
+
+        await interaction.reply({
+
             content:
                 "✅ פאנל הקישורים נשלח.",
-            ephemeral: true
+
+            ephemeral:
+                true
         });
 
         return;
@@ -2837,7 +4043,7 @@ async function handleCommand(
 
     if (
         interaction.commandName ===
-        "פאנל-צוות"
+        "staff-panel"
     ) {
 
         await sendStaffPanel(
@@ -2846,9 +4052,12 @@ async function handleCommand(
         );
 
         await interaction.reply({
+
             content:
                 "✅ פאנל הצוות נשלח.",
-            ephemeral: true
+
+            ephemeral:
+                true
         });
 
         return;
@@ -2860,7 +4069,7 @@ async function handleCommand(
 
     if (
         interaction.commandName ===
-        "הגדר-ספירה"
+        "set-counting"
     ) {
 
         const channel =
@@ -2877,12 +4086,18 @@ async function handleCommand(
         config.lastCounter =
             null;
 
-        saveData();
+        await saveGuildData(
+            guild.id,
+            config
+        );
 
         await interaction.reply({
+
             content:
                 `🔢 חדר הספירה הוגדר ל־${channel}.`,
-            ephemeral: true
+
+            ephemeral:
+                true
         });
 
         return;
@@ -2890,7 +4105,7 @@ async function handleCommand(
 
     if (
         interaction.commandName ===
-        "איפוס-ספירה"
+        "reset-counting"
     ) {
 
         config.countingNumber =
@@ -2899,12 +4114,18 @@ async function handleCommand(
         config.lastCounter =
             null;
 
-        saveData();
+        await saveGuildData(
+            guild.id,
+            config
+        );
 
         await interaction.reply({
+
             content:
                 "✅ הספירה אופסה ל־0.",
-            ephemeral: true
+
+            ephemeral:
+                true
         });
 
         return;
@@ -2922,17 +4143,26 @@ async function handleModal(
     const guild =
         interaction.guild;
 
-    const config =
-        getGuildData(guild.id);
-
-    if (!isStaff(interaction.member)) {
+    if (
+        !(await isStaffMember(
+            interaction.member
+        ))
+    ) {
 
         return interaction.reply({
+
             content:
                 "❌ אין לך הרשאה.",
-            ephemeral: true
+
+            ephemeral:
+                true
         });
     }
+
+    const config =
+        await getGuildData(
+            guild.id
+        );
 
     const userId =
         interaction.fields.getTextInputValue(
@@ -2942,14 +4172,19 @@ async function handleModal(
     const member =
         await guild.members.fetch(
             userId
-        ).catch(() => null);
+        ).catch(
+            () => null
+        );
 
     if (!member) {
 
         return interaction.reply({
+
             content:
                 "❌ המשתמש לא נמצא בשרת.",
-            ephemeral: true
+
+            ephemeral:
+                true
         });
     }
 
@@ -2970,36 +4205,51 @@ async function handleModal(
             );
 
         if (
-            !Number.isInteger(minutes) ||
+            !Number.isInteger(
+                minutes
+            ) ||
             minutes < 1 ||
             minutes > 40320
         ) {
 
             return interaction.reply({
+
                 content:
-                    "❌ זמן לא תקין. הכנס מספר בין 1 ל־40320 דקות.",
-                ephemeral: true
+                    "❌ הכנס זמן בין 1 ל־40320 דקות.",
+
+                ephemeral:
+                    true
             });
         }
 
-        if (!member.moderatable) {
+        if (
+            !member.moderatable
+        ) {
 
             return interaction.reply({
+
                 content:
-                    "❌ אין לי הרשאה לעשות Timeout למשתמש הזה.",
-                ephemeral: true
+                    "❌ אני לא יכול לעשות Timeout למשתמש הזה.",
+
+                ephemeral:
+                    true
             });
         }
 
         await member.timeout(
+
             minutes * 60 * 1000,
+
             `Timeout by ${interaction.user.tag}`
         );
 
         await interaction.reply({
+
             content:
                 `✅ ${member.user.tag} קיבל Timeout ל־${minutes} דקות.`,
-            ephemeral: true
+
+            ephemeral:
+                true
         });
 
         await sendLog(
@@ -3007,7 +4257,6 @@ async function handleModal(
             "⏱️ Timeout",
             `**צוות:** ${interaction.user.tag}\n`
             + `**משתמש:** ${member.user.tag}\n`
-            + `**ID:** ${member.id}\n`
             + `**זמן:** ${minutes} דקות`
         );
 
@@ -3023,29 +4272,38 @@ async function handleModal(
         "modal_ban"
     ) {
 
-        if (!member.bannable) {
+        if (
+            !member.bannable
+        ) {
 
             return interaction.reply({
+
                 content:
                     "❌ אי אפשר לתת Ban למשתמש הזה.",
-                ephemeral: true
+
+                ephemeral:
+                    true
             });
         }
 
         await member.ban({
+
             reason:
                 `Ban by ${interaction.user.tag}`
         });
 
         await interaction.reply({
+
             content:
                 `🔨 ${member.user.tag} קיבל Ban.`,
-            ephemeral: true
+
+            ephemeral:
+                true
         });
 
         await sendLog(
             guild,
-            "🔨 משתמש קיבל Ban",
+            "🔨 Ban",
             `**צוות:** ${interaction.user.tag}\n`
             + `**משתמש:** ${member.user.tag}\n`
             + `**ID:** ${member.id}`
@@ -3063,12 +4321,17 @@ async function handleModal(
         "modal_kick"
     ) {
 
-        if (!member.kickable) {
+        if (
+            !member.kickable
+        ) {
 
             return interaction.reply({
+
                 content:
                     "❌ אי אפשר לתת Kick למשתמש הזה.",
-                ephemeral: true
+
+                ephemeral:
+                    true
             });
         }
 
@@ -3077,14 +4340,17 @@ async function handleModal(
         );
 
         await interaction.reply({
+
             content:
                 `👢 ${member.user.tag} קיבל Kick.`,
-            ephemeral: true
+
+            ephemeral:
+                true
         });
 
         await sendLog(
             guild,
-            "👢 משתמש קיבל Kick",
+            "👢 Kick",
             `**צוות:** ${interaction.user.tag}\n`
             + `**משתמש:** ${member.user.tag}\n`
             + `**ID:** ${member.id}`
@@ -3102,12 +4368,17 @@ async function handleModal(
         "modal_mute"
     ) {
 
-        if (!config.muteRole) {
+        if (
+            !config.muteRole
+        ) {
 
             return interaction.reply({
+
                 content:
-                    "❌ Mute Role עדיין לא הוגדר.",
-                ephemeral: true
+                    "❌ Mute Role לא הוגדר.",
+
+                ephemeral:
+                    true
             });
         }
 
@@ -3119,9 +4390,12 @@ async function handleModal(
         if (!role) {
 
             return interaction.reply({
+
                 content:
                     "❌ Mute Role לא נמצא.",
-                ephemeral: true
+
+                ephemeral:
+                    true
             });
         }
 
@@ -3136,17 +4410,19 @@ async function handleModal(
             );
 
             await interaction.reply({
+
                 content:
                     `🔊 ההשתקה של ${member.user.tag} הוסרה.`,
-                ephemeral: true
+
+                ephemeral:
+                    true
             });
 
             await sendLog(
                 guild,
-                "🔊 השתקה הוסרה",
+                "🔊 Mute הוסר",
                 `**צוות:** ${interaction.user.tag}\n`
-                + `**משתמש:** ${member.user.tag}\n`
-                + `**ID:** ${member.id}`
+                + `**משתמש:** ${member.user.tag}`
             );
 
         } else {
@@ -3156,17 +4432,19 @@ async function handleModal(
             );
 
             await interaction.reply({
+
                 content:
                     `🔇 ${member.user.tag} הושתק.`,
-                ephemeral: true
+
+                ephemeral:
+                    true
             });
 
             await sendLog(
                 guild,
                 "🔇 משתמש הושתק",
                 `**צוות:** ${interaction.user.tag}\n`
-                + `**משתמש:** ${member.user.tag}\n`
-                + `**ID:** ${member.id}`
+                + `**משתמש:** ${member.user.tag}`
             );
         }
 
@@ -3175,7 +4453,7 @@ async function handleModal(
 }
 
 // ============================================================
-// 🔢 COUNTING SYSTEM
+// 🔢 COUNTING
 // ============================================================
 
 client.on(
@@ -3190,14 +4468,14 @@ client.on(
         }
 
         const config =
-            getGuildData(
+            await getGuildData(
                 message.guild.id
             );
 
         if (
             !config.countingChannel ||
             message.channel.id !==
-            config.countingChannel
+                config.countingChannel
         ) {
             return;
         }
@@ -3208,7 +4486,9 @@ client.on(
             );
 
         if (
-            Number.isNaN(number)
+            Number.isNaN(
+                number
+            )
         ) {
             return;
         }
@@ -3219,16 +4499,25 @@ client.on(
         if (
             number !== expected ||
             config.lastCounter ===
-            message.author.id
+                message.author.id
         ) {
 
-            await message.react("❌")
-                .catch(() => {});
+            await message.react(
+                "❌"
+            ).catch(
+                () => {}
+            );
 
-            config.countingNumber = 0;
-            config.lastCounter = null;
+            config.countingNumber =
+                0;
 
-            saveData();
+            config.lastCounter =
+                null;
+
+            await saveGuildData(
+                message.guild.id,
+                config
+            );
 
             await message.channel.send(
                 "❌ הספירה נשברה! מתחילים מחדש מ־**1**."
@@ -3243,10 +4532,16 @@ client.on(
         config.lastCounter =
             message.author.id;
 
-        saveData();
+        await saveGuildData(
+            message.guild.id,
+            config
+        );
 
-        await message.react("✅")
-            .catch(() => {});
+        await message.react(
+            "✅"
+        ).catch(
+            () => {}
+        );
     }
 );
 
@@ -3258,21 +4553,23 @@ client.on(
     "messageDelete",
     async message => {
 
-        if (!message.guild) {
-            return;
-        }
-
-        if (message.author?.bot) {
+        if (
+            !message.guild ||
+            message.author?.bot
+        ) {
             return;
         }
 
         await sendLog(
+
             message.guild,
+
             "🗑️ הודעה נמחקה",
+
             `**משתמש:** ${message.author?.tag || "לא ידוע"}\n`
             + `**ID:** ${message.author?.id || "לא ידוע"}\n`
             + `**חדר:** ${message.channel}\n`
-            + `**תוכן:** ${cleanMentions(message.content || "אין תוכן")}`
+            + `**תוכן:** ${clip(cleanMentions(message.content || "אין תוכן"), 1000)}`
         );
     }
 );
@@ -3283,13 +4580,15 @@ client.on(
 
 client.on(
     "messageUpdate",
-    async (oldMessage, newMessage) => {
+    async (
+        oldMessage,
+        newMessage
+    ) => {
 
-        if (!newMessage.guild) {
-            return;
-        }
-
-        if (newMessage.author?.bot) {
+        if (
+            !newMessage.guild ||
+            newMessage.author?.bot
+        ) {
             return;
         }
 
@@ -3301,13 +4600,15 @@ client.on(
         }
 
         await sendLog(
+
             newMessage.guild,
+
             "✏️ הודעה נערכה",
+
             `**משתמש:** ${newMessage.author?.tag || "לא ידוע"}\n`
-            + `**ID:** ${newMessage.author?.id || "לא ידוע"}\n`
             + `**חדר:** ${newMessage.channel}\n\n`
-            + `**לפני:** ${cleanMentions(oldMessage.content || "לא ידוע")}\n`
-            + `**אחרי:** ${cleanMentions(newMessage.content || "לא ידוע")}`
+            + `**לפני:** ${clip(cleanMentions(oldMessage.content || "לא ידוע"), 800)}\n`
+            + `**אחרי:** ${clip(cleanMentions(newMessage.content || "לא ידוע"), 800)}`
         );
     }
 );
@@ -3318,7 +4619,10 @@ client.on(
 
 client.on(
     "guildMemberUpdate",
-    async (oldMember, newMember) => {
+    async (
+        oldMember,
+        newMember
+    ) => {
 
         const added =
             newMember.roles.cache.filter(
@@ -3341,8 +4645,11 @@ client.on(
         ) {
 
             await sendLog(
+
                 newMember.guild,
+
                 "➕ רול נוסף",
+
                 `**משתמש:** ${newMember.user.tag}\n`
                 + `**רול:** ${role}\n`
                 + `**ID:** ${newMember.id}`
@@ -3354,11 +4661,31 @@ client.on(
         ) {
 
             await sendLog(
+
                 newMember.guild,
+
                 "➖ רול הוסר",
+
                 `**משתמש:** ${newMember.user.tag}\n`
                 + `**רול:** ${role}\n`
                 + `**ID:** ${newMember.id}`
+            );
+        }
+
+        if (
+            oldMember.nickname !==
+            newMember.nickname
+        ) {
+
+            await sendLog(
+
+                newMember.guild,
+
+                "✏️ Nickname השתנה",
+
+                `**משתמש:** ${newMember.user.tag}\n`
+                + `**לפני:** ${oldMember.nickname || "אין"}\n`
+                + `**אחרי:** ${newMember.nickname || "אין"}`
             );
         }
     }
@@ -3370,9 +4697,14 @@ client.on(
 
 client.on(
     "voiceStateUpdate",
-    async (oldState, newState) => {
+    async (
+        oldState,
+        newState
+    ) => {
 
-        if (!newState.guild) {
+        if (
+            !newState.guild
+        ) {
             return;
         }
 
@@ -3382,9 +4714,12 @@ client.on(
         ) {
 
             await sendLog(
+
                 newState.guild,
+
                 "🔊 כניסה לחדר קולי",
-                `**משתמש:** ${newState.member.user.tag}\n`
+
+                `**משתמש:** ${newState.member?.user.tag || "לא ידוע"}\n`
                 + `**חדר:** ${newState.channel.name}`
             );
         }
@@ -3395,9 +4730,12 @@ client.on(
         ) {
 
             await sendLog(
+
                 newState.guild,
+
                 "🔇 יציאה מחדר קולי",
-                `**משתמש:** ${newState.member.user.tag}\n`
+
+                `**משתמש:** ${oldState.member?.user.tag || "לא ידוע"}\n`
                 + `**חדר:** ${oldState.channel.name}`
             );
         }
@@ -3412,13 +4750,18 @@ client.on(
     "channelCreate",
     async channel => {
 
-        if (!channel.guild) {
+        if (
+            !channel.guild
+        ) {
             return;
         }
 
         await sendLog(
+
             channel.guild,
+
             "📁 חדר נוצר",
+
             `**חדר:** ${channel.name}\n`
             + `**ID:** ${channel.id}`
         );
@@ -3429,13 +4772,18 @@ client.on(
     "channelDelete",
     async channel => {
 
-        if (!channel.guild) {
+        if (
+            !channel.guild
+        ) {
             return;
         }
 
         await sendLog(
+
             channel.guild,
+
             "🗑️ חדר נמחק",
+
             `**חדר:** ${channel.name}\n`
             + `**ID:** ${channel.id}`
         );
@@ -3451,8 +4799,11 @@ client.on(
     async role => {
 
         await sendLog(
+
             role.guild,
+
             "🛡️ רול נוצר",
+
             `**רול:** ${role.name}\n`
             + `**ID:** ${role.id}`
         );
@@ -3464,8 +4815,11 @@ client.on(
     async role => {
 
         await sendLog(
+
             role.guild,
+
             "🗑️ רול נמחק",
+
             `**רול:** ${role.name}\n`
             + `**ID:** ${role.id}`
         );
@@ -3473,7 +4827,43 @@ client.on(
 );
 
 // ============================================================
-// ❌ ERROR HANDLING
+// 🔨 BAN LOG
+// ============================================================
+
+client.on(
+    "guildBanAdd",
+    async ban => {
+
+        await sendLog(
+
+            ban.guild,
+
+            "🔨 משתמש קיבל Ban",
+
+            `**משתמש:** ${ban.user.tag}\n`
+            + `**ID:** ${ban.user.id}`
+        );
+    }
+);
+
+client.on(
+    "guildBanRemove",
+    async ban => {
+
+        await sendLog(
+
+            ban.guild,
+
+            "🔓 Ban הוסר",
+
+            `**משתמש:** ${ban.user.tag}\n`
+            + `**ID:** ${ban.user.id}`
+        );
+    }
+);
+
+// ============================================================
+// ❌ ERRORS
 // ============================================================
 
 client.on(
@@ -3481,7 +4871,7 @@ client.on(
     error => {
 
         console.error(
-            "❌ Discord Client Error:",
+            "❌ Discord error:",
             error
         );
     }
@@ -3492,14 +4882,14 @@ process.on(
     error => {
 
         console.error(
-            "❌ Unhandled Rejection:",
+            "❌ Unhandled rejection:",
             error
         );
     }
 );
 
 // ============================================================
-// 🌐 RENDER WEB SERVER
+// 🌐 RENDER SERVER
 // ============================================================
 
 const PORT =
@@ -3507,10 +4897,14 @@ const PORT =
 
 const server =
     http.createServer(
-        (req, res) => {
+        async (
+            req,
+            res
+        ) => {
 
             if (
-                req.url === "/health"
+                req.url ===
+                "/health"
             ) {
 
                 res.writeHead(
@@ -3523,7 +4917,10 @@ const server =
 
                 res.end(
                     JSON.stringify({
-                        status: "ok",
+
+                        status:
+                            "ok",
+
                         bot:
                             client.user
                                 ? client.user.tag
@@ -3554,7 +4951,7 @@ server.listen(
     () => {
 
         console.log(
-            `🌐 Render server listening on ${PORT}`
+            `🌐 Render server running on port ${PORT}`
         );
     }
 );
@@ -3563,4 +4960,6 @@ server.listen(
 // 🔑 LOGIN
 // ============================================================
 
-client.login(TOKEN);
+client.login(
+    TOKEN
+);
