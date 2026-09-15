@@ -52,7 +52,6 @@ if (!CLIENT_ID) {
 
 if (!DATABASE_URL) {
     console.error("❌ DATABASE_URL חסר ב-Render.");
-    console.error("הוסף PostgreSQL ל-Render והוסף את DATABASE_URL.");
     process.exit(1);
 }
 
@@ -132,7 +131,21 @@ function defaultGuildData() {
         tickets: {},
         suggestions: {},
 
-        helpRequests: {}
+        helpRequests: {},
+
+        // ====================================================
+        // 🕖 DAILY
+        // ====================================================
+
+        dailyChannel: null,
+        dailyLastDate: null,
+
+        // ====================================================
+        // 🎫 REQUEST SYSTEMS
+        // ====================================================
+
+        requestCategory: null,
+        requests: {}
     };
 }
 
@@ -150,14 +163,15 @@ async function getGuildData(guildId) {
 
     try {
 
-        const result = await pool.query(
-            `
-            SELECT data
-            FROM guild_settings
-            WHERE guild_id = $1
-            `,
-            [guildId]
-        );
+        const result =
+            await pool.query(
+                `
+                SELECT data
+                FROM guild_settings
+                WHERE guild_id = $1
+                `,
+                [guildId]
+            );
 
         if (result.rows.length === 0) {
 
@@ -193,6 +207,27 @@ async function getGuildData(guildId) {
             ...defaultGuildData(),
             ...saved
         };
+
+        // הגנה אם שדות ישנים לא קיימים
+        if (!merged.tickets) {
+            merged.tickets = {};
+        }
+
+        if (!merged.suggestions) {
+            merged.suggestions = {};
+        }
+
+        if (!merged.helpRequests) {
+            merged.helpRequests = {};
+        }
+
+        if (!merged.links) {
+            merged.links = [];
+        }
+
+        if (!merged.requests) {
+            merged.requests = {};
+        }
 
         guildCache.set(
             guildId,
@@ -456,6 +491,730 @@ async function sendLog(
 }
 
 // ============================================================
+// 🕖 DAILY QUESTIONS + RIDDLES
+// ============================================================
+
+const DAILY_ITEMS = [
+
+    {
+        question: "מה הדבר הכי כיף שעשיתם השבוע? 💙",
+        riddle: "יש לי שיניים אבל אני לא נושך. מי אני?"
+    },
+
+    {
+        question: "אם הייתם יכולים לטייל בכל מקום בעולם, לאן הייתם נוסעים? 🌍",
+        riddle: "מה עולה אבל אף פעם לא יורד?"
+    },
+
+    {
+        question: "איזה משחק אתם הכי אוהבים לשחק עם חברים? 🎮",
+        riddle: "מה יש לו פנים וידיים אבל אין לו גוף?"
+    },
+
+    {
+        question: "מה המאכל שהייתם יכולים לאכול כל יום? 🍕",
+        riddle: "אני מלא חורים אבל עדיין מחזיק מים. מי אני?"
+    },
+
+    {
+        question: "אם הייתם מקבלים מיליון שקל, מה הדבר הראשון שהייתם עושים? 💰",
+        riddle: "מה נשבר בלי שנוגעים בו?"
+    },
+
+    {
+        question: "איזה כוח-על הייתם בוחרים? ⚡",
+        riddle: "מה הולך סביב העולם אבל נשאר בפינה?"
+    },
+
+    {
+        question: "מה הדבר שהכי מצחיק אתכם? 😂",
+        riddle: "יש לי צוואר אבל אין לי ראש. מה אני?"
+    },
+
+    {
+        question: "איזה סרט או סדרה אתם הכי ממליצים לראות? 🎬",
+        riddle: "מה יכול למלא חדר אבל לא תופס מקום?"
+    },
+
+    {
+        question: "מה הייתם מעדיפים: חופשה או כסף? 🏖️",
+        riddle: "מה יש לו הרבה מילים אבל אף פעם לא מדבר?"
+    },
+
+    {
+        question: "איזה שיר אתם הכי אוהבים כרגע? 🎵",
+        riddle: "מה רץ אבל אף פעם לא הולך?"
+    },
+
+    {
+        question: "מה המשחק הראשון ששיחקתם בו? 🎮",
+        riddle: "מה שייך לך אבל אנשים אחרים משתמשים בו יותר ממך?"
+    },
+
+    {
+        question: "אם הייתם יכולים לפגוש דמות ממשחק, מי זאת הייתה? 👀",
+        riddle: "מה יש באמצע של פריז?"
+    },
+
+    {
+        question: "מה הייתם מעדיפים: ים או בריכה? 🌊",
+        riddle: "איזה חודש יש בו 28 ימים?"
+    },
+
+    {
+        question: "מה הדבר הכי חשוב לדעתכם בקהילה טובה? 💙",
+        riddle: "מה נהיה רטוב יותר ככל שהוא מייבש?"
+    },
+
+    {
+        question: "מה הייתם רוצים שיוסיפו ל-ChillZone? 🔵",
+        riddle: "מה אפשר לתפוס אבל אי אפשר לזרוק?"
+    },
+
+    {
+        question: "מה התחביב שהכי הייתם רוצים להתחיל? ⭐",
+        riddle: "מה יש לו עין אחת אבל הוא לא רואה?"
+    },
+
+    {
+        question: "איזה יעד הייתם רוצים להשיג השנה? 🏆",
+        riddle: "מה עולה ויורד אבל נשאר באותו מקום?"
+    },
+
+    {
+        question: "מי במשחקים שלכם תמיד הכי מצחיק אתכם? 😂",
+        riddle: "מה יש לו ראש וזנב אבל אין לו גוף?"
+    },
+
+    {
+        question: "מה הייתם בוחרים: להיות הכי טוב במשחק אחד או טוב בהרבה משחקים? 🎮",
+        riddle: "מה אפשר לשבור רק במילה?"
+    },
+
+    {
+        question: "איזה אירוע הייתם רוצים לראות בשרת? 🔵",
+        riddle: "מה עובר דרך ערים ושדות אבל אף פעם לא זז?"
+    }
+
+];
+
+function getIsraelDateInfo() {
+
+    const now =
+        new Date();
+
+    const formatter =
+        new Intl.DateTimeFormat(
+            "en-GB",
+            {
+                timeZone: "Asia/Jerusalem",
+                year: "numeric",
+                month: "2-digit",
+                day: "2-digit",
+                hour: "2-digit",
+                minute: "2-digit",
+                hourCycle: "h23"
+            }
+        );
+
+    const parts =
+        formatter
+            .formatToParts(now);
+
+    const values = {};
+
+    for (const part of parts) {
+        values[part.type] =
+            part.value;
+    }
+
+    return {
+
+        date:
+            `${values.year}-${values.month}-${values.day}`,
+
+        hour:
+            Number(values.hour),
+
+        minute:
+            Number(values.minute)
+    };
+}
+
+function getDailyItem(dateString) {
+
+    let hash = 0;
+
+    for (
+        let i = 0;
+        i < dateString.length;
+        i++
+    ) {
+
+        hash =
+            (
+                (
+                    hash << 5
+                ) -
+                hash +
+                dateString.charCodeAt(i)
+            ) |
+            0;
+    }
+
+    const index =
+        Math.abs(hash) %
+        DAILY_ITEMS.length;
+
+    return DAILY_ITEMS[index];
+}
+
+async function checkDailyMessages() {
+
+    try {
+
+        const time =
+            getIsraelDateInfo();
+
+        // שולח רק במהלך הדקה 07:00
+        if (
+            time.hour !== 7 ||
+            time.minute !== 0
+        ) {
+            return;
+        }
+
+        for (
+            const guild of
+                client.guilds.cache.values()
+        ) {
+
+            const config =
+                await getGuildData(
+                    guild.id
+                );
+
+            if (!config.dailyChannel) {
+                continue;
+            }
+
+            if (
+                config.dailyLastDate ===
+                time.date
+            ) {
+                continue;
+            }
+
+            const channel =
+                guild.channels.cache.get(
+                    config.dailyChannel
+                );
+
+            if (!channel) {
+                continue;
+            }
+
+            const item =
+                getDailyItem(
+                    time.date
+                );
+
+            const embed =
+                makeEmbed(
+
+                    guild,
+
+                    "🌅 ChillZone — יום חדש!",
+
+                    "בוקר טוב לקהילה! 💙\n\n"
+                    + "💬 **השאלה היומית:**\n"
+                    + `${item.question}\n\n`
+                    + "🧩 **החידה היומית:**\n"
+                    + `${item.riddle}\n\n`
+                    + "יאללה, מחכים לתשובות שלכם! 🔵"
+                );
+
+            await channel.send({
+                embeds: [embed]
+            });
+
+            config.dailyLastDate =
+                time.date;
+
+            await saveGuildData(
+                guild.id,
+                config
+            );
+
+            await sendLog(
+                guild,
+                "🌅 שאלה וחידה יומית נשלחו",
+                `**חדר:** ${channel}\n`
+                + `**תאריך:** ${time.date}`
+            );
+        }
+
+    } catch (error) {
+
+        console.error(
+            "❌ Daily system error:",
+            error
+        );
+    }
+}
+
+// ============================================================
+// 🎫 REQUEST SYSTEM
+// ============================================================
+
+const REQUEST_TYPES = {
+
+    ban: {
+        name: "הסרת באן",
+        emoji: "🚫",
+        description: "בקשה לבדיקה של Ban"
+    },
+
+    adult: {
+        name: "17+",
+        emoji: "🔞",
+        description: "בקשת גישה למערכת 17+"
+    },
+
+    vip: {
+        name: "VIP",
+        emoji: "💎",
+        description: "בקשת VIP"
+    }
+
+};
+
+function getRequestType(
+    type
+) {
+
+    return REQUEST_TYPES[type] ||
+        REQUEST_TYPES.ban;
+}
+
+function createRequestButtons(
+    type,
+    channelId,
+    decided = false
+) {
+
+    const buttons = [];
+
+    buttons.push(
+
+        new ButtonBuilder()
+            .setCustomId(
+                `request_approve_${type}_${channelId}`
+            )
+            .setLabel(
+                "אישור"
+            )
+            .setEmoji(
+                "✅"
+            )
+            .setStyle(
+                ButtonStyle.Primary
+            )
+            .setDisabled(
+                decided
+            )
+    );
+
+    buttons.push(
+
+        new ButtonBuilder()
+            .setCustomId(
+                `request_reject_${type}_${channelId}`
+            )
+            .setLabel(
+                "דחייה"
+            )
+            .setEmoji(
+                "❌"
+            )
+            .setStyle(
+                ButtonStyle.Danger
+            )
+            .setDisabled(
+                decided
+            )
+    );
+
+    buttons.push(
+
+        new ButtonBuilder()
+            .setCustomId(
+                `request_close_${type}_${channelId}`
+            )
+            .setLabel(
+                "סגור"
+            )
+            .setEmoji(
+                "🔒"
+            )
+            .setStyle(
+                ButtonStyle.Secondary
+            )
+    );
+
+    return new ActionRowBuilder()
+        .addComponents(
+            buttons
+        );
+}
+
+async function sendRequestPanel(
+    guild,
+    channel,
+    type
+) {
+
+    const request =
+        getRequestType(type);
+
+    const embed =
+        makeEmbed(
+
+            guild,
+
+            `${request.emoji} בקשת ${request.name}`,
+
+            `צריך לפתוח בקשה בנושא **${request.name}**?\n\n`
+            + `${request.emoji} ${request.description}\n\n`
+            + "לחץ על הכפתור למטה כדי לפתוח בקשה פרטית.\n"
+            + "הבקשה תגיע לצוות לבדיקה.\n\n"
+            + "🛡️ רק אתה והצוות יוכלו לראות את החדר."
+        );
+
+    const row =
+        new ActionRowBuilder()
+            .addComponents(
+
+                new ButtonBuilder()
+                    .setCustomId(
+                        `request_open_${type}`
+                    )
+                    .setLabel(
+                        `בקשת ${request.name}`
+                    )
+                    .setEmoji(
+                        request.emoji
+                    )
+                    .setStyle(
+                        ButtonStyle.Primary
+                    )
+            );
+
+    await channel.send({
+
+        embeds: [
+            embed
+        ],
+
+        components: [
+            row
+        ]
+    });
+}
+
+async function createRequestTicket(
+    interaction,
+    type
+) {
+
+    const guild =
+        interaction.guild;
+
+    const member =
+        interaction.member;
+
+    const config =
+        await getGuildData(
+            guild.id
+        );
+
+    const requestType =
+        getRequestType(type);
+
+    if (!config.requestCategory) {
+
+        return interaction.reply({
+
+            content:
+                "❌ קטגוריית הבקשות עדיין לא הוגדרה.\n"
+                + "השתמש ב־`/set-request-category`.",
+
+            ephemeral:
+                true
+        });
+    }
+
+    if (!config.staffRole) {
+
+        return interaction.reply({
+
+            content:
+                "❌ Staff Role עדיין לא הוגדר.\n"
+                + "השתמש ב־`/set-staff`.",
+
+            ephemeral:
+                true
+        });
+    }
+
+    const category =
+        guild.channels.cache.get(
+            config.requestCategory
+        );
+
+    if (
+        !category ||
+        category.type !== ChannelType.GuildCategory
+    ) {
+
+        return interaction.reply({
+
+            content:
+                "❌ קטגוריית הבקשות לא נמצאה.",
+
+            ephemeral:
+                true
+        });
+    }
+
+    // ========================================================
+    // בדיקת בקשה קיימת מאותו סוג
+    // ========================================================
+
+    const existing =
+        Object.entries(
+            config.requests || {}
+        ).find(
+            ([channelId, request]) =>
+                request.userId === member.id &&
+                request.type === type &&
+                request.status === "open"
+        );
+
+    if (existing) {
+
+        const oldChannel =
+            guild.channels.cache.get(
+                existing[0]
+            );
+
+        if (oldChannel) {
+
+            return interaction.reply({
+
+                content:
+                    `❌ כבר יש לך בקשת ${requestType.name} פתוחה: ${oldChannel}`,
+
+                ephemeral:
+                    true
+            });
+        }
+
+        delete config.requests[
+            existing[0]
+        ];
+
+        await saveGuildData(
+            guild.id,
+            config
+        );
+    }
+
+    const safeUsername =
+        member.user.username
+            .toLowerCase()
+            .replace(
+                /[^a-z0-9]/g,
+                ""
+            )
+            .slice(
+                0,
+                15
+            ) ||
+        "user";
+
+    const channelName =
+        `request-${type}-${safeUsername}`;
+
+    const overwrites = [
+
+        {
+            id:
+                guild.roles.everyone.id,
+
+            deny: [
+                PermissionsBitField.Flags.ViewChannel
+            ]
+        },
+
+        {
+            id:
+                member.id,
+
+            allow: [
+
+                PermissionsBitField.Flags.ViewChannel,
+
+                PermissionsBitField.Flags.SendMessages,
+
+                PermissionsBitField.Flags.ReadMessageHistory
+
+            ]
+        },
+
+        {
+            id:
+                config.staffRole,
+
+            allow: [
+
+                PermissionsBitField.Flags.ViewChannel,
+
+                PermissionsBitField.Flags.SendMessages,
+
+                PermissionsBitField.Flags.ReadMessageHistory
+
+            ]
+        }
+
+    ];
+
+    const channel =
+        await guild.channels.create({
+
+            name:
+                channelName,
+
+            type:
+                ChannelType.GuildText,
+
+            parent:
+                category.id,
+
+            permissionOverwrites:
+                overwrites
+        });
+
+    config.requests[
+        channel.id
+    ] = {
+
+        userId:
+            member.id,
+
+        type:
+            type,
+
+        status:
+            "open",
+
+        decided:
+            false,
+
+        accepted:
+            null,
+
+        decidedBy:
+            null,
+
+        createdAt:
+            Date.now()
+    };
+
+    await saveGuildData(
+        guild.id,
+        config
+    );
+
+    const embed =
+        makeEmbed(
+
+            guild,
+
+            `${requestType.emoji} בקשת ${requestType.name}`,
+
+            `שלום ${member}! 👋\n\n`
+            + `הבקשה שלך בנושא **${requestType.name}** נפתחה.\n`
+            + "איש צוות יטפל בבקשה.\n\n"
+            + "🤖 **AI אינו פעיל בחדר הזה.**\n"
+            + "🛡️ רק אתה והצוות יכולים לראות את החדר."
+        );
+
+    embed.addFields({
+
+        name:
+            "👤 מגיש הבקשה",
+
+        value:
+            `${member}\n\`${member.id}\``,
+
+        inline:
+            true
+    });
+
+    embed.addFields({
+
+        name:
+            "📌 סטטוס",
+
+        value:
+            "🟡 ממתין לבדיקה",
+
+        inline:
+            true
+    });
+
+    await channel.send({
+
+        content:
+            `<@&${config.staffRole}> ${member}`,
+
+        embeds: [
+            embed
+        ],
+
+        components: [
+            createRequestButtons(
+                type,
+                channel.id,
+                false
+            )
+        ]
+    });
+
+    await interaction.reply({
+
+        content:
+            `✅ בקשת ${requestType.name} נפתחה: ${channel}`,
+
+        ephemeral:
+            true
+    });
+
+    await sendLog(
+
+        guild,
+
+        `${requestType.emoji} בקשת ${requestType.name} נפתחה`,
+
+        `**משתמש:** ${member.user.tag}\n`
+        + `**ID:** ${member.id}\n`
+        + `**חדר:** ${channel}\n`
+        + `**סוג:** ${requestType.name}`
+    );
+}
+
+// ============================================================
 // 📜 SLASH COMMANDS
 // ============================================================
 
@@ -671,7 +1430,65 @@ const commands = [
 
     new SlashCommandBuilder()
         .setName("reset-counting")
-        .setDescription("איפוס הספירה")
+        .setDescription("איפוס הספירה"),
+
+    // ========================================================
+    // 🕖 DAILY
+    // ========================================================
+
+    new SlashCommandBuilder()
+        .setName("set-daily")
+        .setDescription("הגדרת חדר שאלה וחידה יומית")
+        .addChannelOption(option =>
+            option
+                .setName("channel")
+                .setDescription("החדר שבו יישלחו השאלה והחידה")
+                .setRequired(true)
+                .addChannelTypes(
+                    ChannelType.GuildText
+                )
+        ),
+
+    // ========================================================
+    // 🎫 REQUEST CATEGORY
+    // ========================================================
+
+    new SlashCommandBuilder()
+        .setName("set-request-category")
+        .setDescription("הגדרת קטגוריית בקשות")
+        .addChannelOption(option =>
+            option
+                .setName("category")
+                .setDescription("קטגוריית חדרי הבקשות")
+                .setRequired(true)
+                .addChannelTypes(
+                    ChannelType.GuildCategory
+                )
+        ),
+
+    // ========================================================
+    // 🚫 BAN REQUEST
+    // ========================================================
+
+    new SlashCommandBuilder()
+        .setName("ban-request-panel")
+        .setDescription("שליחת פאנל בקשת הסרת באן"),
+
+    // ========================================================
+    // 🔞 17+ REQUEST
+    // ========================================================
+
+    new SlashCommandBuilder()
+        .setName("adult-request-panel")
+        .setDescription("שליחת פאנל בקשת 17+"),
+
+    // ========================================================
+    // 💎 VIP REQUEST
+    // ========================================================
+
+    new SlashCommandBuilder()
+        .setName("vip-request-panel")
+        .setDescription("שליחת פאנל בקשת VIP")
 
 ].map(command =>
     command.toJSON()
@@ -693,12 +1510,15 @@ async function registerCommands() {
         if (GUILD_ID) {
 
             await rest.put(
+
                 Routes.applicationGuildCommands(
                     CLIENT_ID,
                     GUILD_ID
                 ),
+
                 {
-                    body: commands
+                    body:
+                        commands
                 }
             );
 
@@ -709,11 +1529,14 @@ async function registerCommands() {
         } else {
 
             await rest.put(
+
                 Routes.applicationCommands(
                     CLIENT_ID
                 ),
+
                 {
-                    body: commands
+                    body:
+                        commands
                 }
             );
 
@@ -746,20 +1569,26 @@ client.once(
         client.user.setPresence({
 
             activities: [
+
                 {
-                    name: "ChillZone 🔵",
-                    type: ActivityType.Watching
+                    name:
+                        "ChillZone 🔵",
+
+                    type:
+                        ActivityType.Watching
                 }
+
             ],
 
-            status: "online"
+            status:
+                "online"
         });
 
         await initDatabase();
 
-        // טעינת כל השרתים לזיכרון
         for (
-            const guild of client.guilds.cache.values()
+            const guild of
+                client.guilds.cache.values()
         ) {
 
             await getGuildData(
@@ -768,6 +1597,19 @@ client.once(
         }
 
         await registerCommands();
+
+        // ====================================================
+        // 🕖 DAILY CHECK
+        // ====================================================
+
+        setInterval(
+            checkDailyMessages,
+            30 * 1000
+        );
+
+        console.log(
+            "🕖 מערכת השאלה והחידה היומית פעילה."
+        );
     }
 );
 
@@ -799,23 +1641,34 @@ client.on(
 
                     const embed =
                         makeEmbed(
+
                             member.guild,
+
                             "👋 ברוכים הבאים ל־ChillZone!",
+
                             `היי ${member}! 👋\n\n`
                             + `שמחים שהצטרפת לקהילה שלנו 💙\n`
                             + `תיהנה, תכיר אנשים ותשתתף בקהילה!`
                         );
 
                     await channel.send({
-                        content: `${member}`,
-                        embeds: [embed]
+
+                        content:
+                            `${member}`,
+
+                        embeds: [
+                            embed
+                        ]
                     });
                 }
             }
 
             await sendLog(
+
                 member.guild,
+
                 "👋 משתמש נכנס",
+
                 `**משתמש:** ${member.user.tag}\n`
                 + `**ID:** ${member.id}`
             );
@@ -839,8 +1692,11 @@ client.on(
     async member => {
 
         await sendLog(
+
             member.guild,
+
             "🚪 משתמש יצא",
+
             `**משתמש:** ${member.user?.tag || "לא ידוע"}\n`
             + `**ID:** ${member.id}`
         );
@@ -858,8 +1714,11 @@ async function sendVerifyPanel(
 
     const embed =
         makeEmbed(
+
             guild,
+
             "🔐 אימות ChillZone",
+
             "ברוכים הבאים לשרת! 💙\n\n"
             + "לחץ על הכפתור למטה כדי לאמת את עצמך.\n\n"
             + "לאחר האימות תקבל את הרול שהוגדר."
@@ -873,16 +1732,26 @@ async function sendVerifyPanel(
                     .setCustomId(
                         "verify_member"
                     )
-                    .setLabel("אימות")
-                    .setEmoji("✅")
+                    .setLabel(
+                        "אימות"
+                    )
+                    .setEmoji(
+                        "✅"
+                    )
                     .setStyle(
                         ButtonStyle.Primary
                     )
             );
 
     await channel.send({
-        embeds: [embed],
-        components: [row]
+
+        embeds: [
+            embed
+        ],
+
+        components: [
+            row
+        ]
     });
 }
 
@@ -897,8 +1766,11 @@ async function sendTicketPanel(
 
     const embed =
         makeEmbed(
+
             guild,
+
             "🎫 מערכת הטיקטים",
+
             "צריך עזרה? אנחנו כאן בשבילך 💙\n\n"
             + "בחר את סוג הפנייה:\n\n"
             + "🆘 **תמיכה**\n"
@@ -919,45 +1791,77 @@ async function sendTicketPanel(
             .addOptions(
 
                 new StringSelectMenuOptionBuilder()
-                    .setLabel("תמיכה")
+                    .setLabel(
+                        "תמיכה"
+                    )
                     .setDescription(
                         "עזרה כללית"
                     )
-                    .setEmoji("🆘")
-                    .setValue("support"),
+                    .setEmoji(
+                        "🆘"
+                    )
+                    .setValue(
+                        "support"
+                    ),
 
                 new StringSelectMenuOptionBuilder()
-                    .setLabel("דיווח")
+                    .setLabel(
+                        "דיווח"
+                    )
                     .setDescription(
                         "דיווח על משתמש או בעיה"
                     )
-                    .setEmoji("🚨")
-                    .setValue("report"),
+                    .setEmoji(
+                        "🚨"
+                    )
+                    .setValue(
+                        "report"
+                    ),
 
                 new StringSelectMenuOptionBuilder()
-                    .setLabel("בחינה לצוות")
+                    .setLabel(
+                        "בחינה לצוות"
+                    )
                     .setDescription(
                         "פנייה בנושא צוות"
                     )
-                    .setEmoji("👮")
-                    .setValue("staff"),
+                    .setEmoji(
+                        "👮"
+                    )
+                    .setValue(
+                        "staff"
+                    ),
 
                 new StringSelectMenuOptionBuilder()
-                    .setLabel("אחר")
+                    .setLabel(
+                        "אחר"
+                    )
                     .setDescription(
                         "נושא אחר"
                     )
-                    .setEmoji("❓")
-                    .setValue("other")
+                    .setEmoji(
+                        "❓"
+                    )
+                    .setValue(
+                        "other"
+                    )
             );
 
     const row =
         new ActionRowBuilder()
-            .addComponents(menu);
+            .addComponents(
+                menu
+            );
 
     await channel.send({
-        embeds: [embed],
-        components: [row]
+
+        embeds: [
+            embed
+        ],
+
+        components: [
+            row
+        ]
     });
 }
 
@@ -981,11 +1885,15 @@ function createTicketButtons(
                         ? "טיקט נלקח"
                         : "קח טיקט"
                 )
-                .setEmoji("🙋")
+                .setEmoji(
+                    "🙋"
+                )
                 .setStyle(
+
                     claimed
                         ? ButtonStyle.Secondary
                         : ButtonStyle.Primary
+
                 )
                 .setDisabled(
                     claimed
@@ -998,7 +1906,9 @@ function createTicketButtons(
                 .setLabel(
                     "הוסף צוות"
                 )
-                .setEmoji("👥")
+                .setEmoji(
+                    "👥"
+                )
                 .setStyle(
                     ButtonStyle.Primary
                 ),
@@ -1010,7 +1920,9 @@ function createTicketButtons(
                 .setLabel(
                     "סגור טיקט"
                 )
-                .setEmoji("🔒")
+                .setEmoji(
+                    "🔒"
+                )
                 .setStyle(
                     ButtonStyle.Danger
                 )
@@ -1042,7 +1954,8 @@ async function createTicket(
             config.tickets
         ).find(
             ([channelId, ticket]) =>
-                ticket.userId === member.id
+                ticket.userId ===
+                member.id
         );
 
     if (existing) {
@@ -1055,9 +1968,12 @@ async function createTicket(
         if (oldChannel) {
 
             return interaction.reply({
+
                 content:
                     `❌ כבר יש לך טיקט פתוח: ${oldChannel}`,
-                ephemeral: true
+
+                ephemeral:
+                    true
             });
         }
     }
@@ -1065,10 +1981,13 @@ async function createTicket(
     if (!config.ticketCategory) {
 
         return interaction.reply({
+
             content:
                 "❌ עדיין לא הוגדרה קטגוריית טיקטים.\n"
                 + "השתמש ב־`/set-ticket-category`.",
-            ephemeral: true
+
+            ephemeral:
+                true
         });
     }
 
@@ -1079,25 +1998,33 @@ async function createTicket(
 
     if (
         !category ||
-        category.type !== ChannelType.GuildCategory
+        category.type !==
+            ChannelType.GuildCategory
     ) {
 
         return interaction.reply({
+
             content:
                 "❌ קטגוריית הטיקטים לא נמצאה.",
-            ephemeral: true
+
+            ephemeral:
+                true
         });
     }
 
     const typeNames = {
 
-        support: "תמיכה",
+        support:
+            "תמיכה",
 
-        report: "דיווח",
+        report:
+            "דיווח",
 
-        staff: "בחינה לצוות",
+        staff:
+            "בחינה לצוות",
 
-        other: "אחר"
+        other:
+            "אחר"
     };
 
     const safeUsername =
@@ -1123,7 +2050,9 @@ async function createTicket(
                 guild.roles.everyone.id,
 
             deny: [
+
                 PermissionsBitField.Flags.ViewChannel
+
             ]
         },
 
@@ -1144,7 +2073,6 @@ async function createTicket(
 
     ];
 
-    // רק צוות עם Staff Role יקבל גישה לפני Claim
     if (config.staffRole) {
 
         overwrites.push({
@@ -1213,8 +2141,11 @@ async function createTicket(
 
     const embed =
         makeEmbed(
+
             guild,
+
             `🎫 טיקט — ${typeNames[type]}`,
+
             `שלום ${member}! 👋\n\n`
             + `הטיקט שלך נפתח בהצלחה.\n`
             + `כתוב כאן במה אתה צריך עזרה.\n\n`
@@ -1242,7 +2173,8 @@ async function createTicket(
         content:
             `✅ הטיקט שלך נפתח: ${channel}`,
 
-        ephemeral: true
+        ephemeral:
+            true
     });
 
     await sendLog(
@@ -1311,9 +2243,12 @@ async function showStaffSelector(
     if (!members.length) {
 
         return interaction.reply({
+
             content:
                 "❌ לא נמצאו משתמשים עם Staff Role.",
-            ephemeral: true
+
+            ephemeral:
+                true
         });
     }
 
@@ -1328,13 +2263,19 @@ async function showStaffSelector(
             member =>
 
                 new StringSelectMenuOptionBuilder()
+
                     .setLabel(
                         member.user.username
-                            .slice(0, 100)
+                            .slice(
+                                0,
+                                100
+                            )
                     )
+
                     .setDescription(
                         `ID: ${member.id}`
                     )
+
                     .setValue(
                         member.id
                     )
@@ -1342,12 +2283,15 @@ async function showStaffSelector(
 
     const menu =
         new StringSelectMenuBuilder()
+
             .setCustomId(
                 `ticket_add_staff_select_${interaction.channel.id}`
             )
+
             .setPlaceholder(
                 "👥 בחר איש צוות"
             )
+
             .addOptions(
                 options
             );
@@ -1369,7 +2313,8 @@ async function showStaffSelector(
             row
         ],
 
-        ephemeral: true
+        ephemeral:
+            true
     });
 }
 
@@ -1396,7 +2341,8 @@ async function askGemini(
         const contents = [];
 
         for (
-            const item of history.slice(-20)
+            const item of
+                history.slice(-20)
         ) {
 
             contents.push({
@@ -1405,10 +2351,12 @@ async function askGemini(
                     item.role,
 
                 parts: [
+
                     {
                         text:
                             item.text
                     }
+
                 ]
             });
         }
@@ -1419,10 +2367,12 @@ async function askGemini(
                 "user",
 
             parts: [
+
                 {
                     text:
                         message
                 }
+
             ]
         });
 
@@ -1467,6 +2417,7 @@ async function askGemini(
                                 maxOutputTokens:
                                     4096
                             }
+
                         })
                 }
             );
@@ -1659,15 +2610,20 @@ client.on(
 
                         confirmation
                             .delete()
-                            .catch(() => {});
+                            .catch(
+                                () => {}
+                            );
 
                     },
                     3000
                 );
 
                 await sendLog(
+
                     guild,
+
                     "🧹 ניקוי הודעות",
+
                     `**צוות:** ${message.author.tag}\n`
                     + `**חדר:** ${message.channel}\n`
                     + `**כמות שבוקשה:** ${amount}\n`
@@ -1696,7 +2652,9 @@ client.on(
         if (
             message.content
                 .trim()
-                .startsWith("!הצעה")
+                .startsWith(
+                    "!הצעה"
+                )
         ) {
 
             const suggestion =
@@ -1797,8 +2755,11 @@ client.on(
 
             const embed =
                 makeEmbed(
+
                     guild,
+
                     "💡 הצעה חדשה",
+
                     `**מאת:** ${message.author}\n\n`
                     + `**ההצעה:**\n${cleanMentions(suggestion)}`
                 );
@@ -1845,10 +2806,6 @@ client.on(
                             )
                     );
 
-            // =================================================
-            // 📢 תיוג Staff Role
-            // =================================================
-
             const roleMention =
                 config.suggestionRole
                     ? `<@&${config.suggestionRole}>`
@@ -1873,11 +2830,29 @@ client.on(
             );
 
             await sendLog(
+
                 guild,
+
                 "💡 הצעה נשלחה",
+
                 `**משתמש:** ${message.author.tag}\n`
                 + `**הצעה:** ${cleanMentions(suggestion)}`
             );
+
+            return;
+        }
+
+        // ====================================================
+        // 🚫 REQUEST CHANNELS
+        // אין AI בבקשות
+        // ====================================================
+
+        if (
+            config.requests &&
+            config.requests[
+                message.channel.id
+            ]
+        ) {
 
             return;
         }
@@ -1938,7 +2913,6 @@ client.on(
             return;
         }
 
-        // אחרי Claim ה-AI מפסיק
         if (
             ticket.claimed
         ) {
@@ -1961,7 +2935,9 @@ client.on(
 
         const answer =
             await askGemini(
+
                 message.content,
+
                 ticket.aiHistory
             );
 
@@ -2120,7 +3096,9 @@ async function handleSelect(
     ) {
 
         await createTicket(
+
             interaction,
+
             interaction.values[0]
         );
 
@@ -2244,7 +3222,9 @@ async function handleSelect(
         }
 
         await channel.permissionOverwrites.edit(
+
             member.id,
+
             {
 
                 ViewChannel:
@@ -2277,8 +3257,11 @@ async function handleSelect(
         );
 
         await sendLog(
+
             guild,
+
             "👥 צוות נוסף לטיקט",
+
             `**הוסיף:** ${interaction.user.tag}\n`
             + `**נוסף:** ${member.user.tag}\n`
             + `**טיקט:** ${channel}`
@@ -2381,8 +3364,11 @@ async function handleButton(
             });
 
             await sendLog(
+
                 guild,
+
                 "🔐 משתמש אומת",
+
                 `**משתמש:** ${interaction.user.tag}\n`
                 + `**ID:** ${interaction.user.id}\n`
                 + `**רול:** ${role.name}`
@@ -2470,17 +3456,15 @@ async function handleButton(
             config
         );
 
-        // ================================================
-        // 🚫 Staff Role no longer sees ticket
-        // ================================================
-
         if (
             config.staffRole
         ) {
 
             await interaction.channel
                 .permissionOverwrites.edit(
+
                     config.staffRole,
+
                     {
 
                         ViewChannel:
@@ -2495,13 +3479,11 @@ async function handleButton(
                 );
         }
 
-        // ================================================
-        // 🙋 Claimant gets access
-        // ================================================
-
         await interaction.channel
             .permissionOverwrites.edit(
+
                 interaction.user.id,
+
                 {
 
                     ViewChannel:
@@ -2515,10 +3497,6 @@ async function handleButton(
                 }
             );
 
-        // ================================================
-        // 👥 Previously added staff
-        // ================================================
-
         for (
             const staffId of
                 ticket.addedStaff || []
@@ -2526,7 +3504,9 @@ async function handleButton(
 
             await interaction.channel
                 .permissionOverwrites.edit(
+
                     staffId,
+
                     {
 
                         ViewChannel:
@@ -2538,20 +3518,21 @@ async function handleButton(
                         ReadMessageHistory:
                             true
                     }
+
                 )
                 .catch(
                     () => {}
                 );
         }
 
-        // ================================================
-        // 🔘 Disable claim button
-        // ================================================
-
         await interaction.message.edit({
 
             components: [
-                createTicketButtons(true)
+
+                createTicketButtons(
+                    true
+                )
+
             ]
         });
 
@@ -2565,14 +3546,19 @@ async function handleButton(
         });
 
         await interaction.channel.send(
+
             `🙋 **${interaction.user} לקח את הטיקט.**\n`
             + `🤖 ה-AI הפסיק לענות בטיקט הזה.\n`
             + `👥 כדי להוסיף איש צוות נוסף, השתמש בכפתור **הוסף צוות**.`
+
         );
 
         await sendLog(
+
             guild,
+
             "🙋 טיקט נלקח",
+
             `**צוות:** ${interaction.user.tag}\n`
             + `**טיקט:** ${interaction.channel.name}`
         );
@@ -2630,7 +3616,7 @@ async function handleButton(
     }
 
     // ========================================================
-    // 🔒 CLOSE
+    // 🔒 CLOSE TICKET
     // ========================================================
 
     if (
@@ -2679,13 +3665,17 @@ async function handleButton(
         );
 
         await sendLog(
+
             guild,
+
             "🔒 טיקט נסגר",
+
             `**על ידי:** ${interaction.user.tag}\n`
             + `**טיקט:** ${interaction.channel.name}`
         );
 
         setTimeout(
+
             async () => {
 
                 const latest =
@@ -2709,6 +3699,7 @@ async function handleButton(
                     );
 
             },
+
             5000
         );
 
@@ -2823,6 +3814,7 @@ async function handleButton(
                 );
 
         modal.addComponents(
+
             new ActionRowBuilder()
                 .addComponents(
                     userInput
@@ -2853,6 +3845,7 @@ async function handleButton(
                     );
 
             modal.addComponents(
+
                 new ActionRowBuilder()
                     .addComponents(
                         timeInput
@@ -2909,7 +3902,8 @@ async function handleButton(
                 )
                 .replace(
                     "suggestion_reject_",
-                    "");
+                    ""
+                );
 
         const suggestion =
             config.suggestions[
@@ -2956,10 +3950,6 @@ async function handleButton(
             config
         );
 
-        // ================================================
-        // 📩 DM
-        // ================================================
-
         const user =
             await client.users.fetch(
                 suggestion.userId
@@ -2992,9 +3982,11 @@ async function handleButton(
 
                 value:
                     clip(
+
                         cleanMentions(
                             suggestion.content
                         ),
+
                         1000
                     )
             });
@@ -3009,10 +4001,6 @@ async function handleButton(
                 () => {}
             );
         }
-
-        // ================================================
-        // UPDATE STAFF MESSAGE
-        // ================================================
 
         const resultEmbed =
             makeEmbed(
@@ -3050,13 +4038,332 @@ async function handleButton(
         });
 
         await sendLog(
+
             guild,
+
             accepted
                 ? "💡 הצעה אושרה"
                 : "💡 הצעה נדחתה",
+
             `**משתמש:** <@${suggestion.userId}>\n`
             + `**צוות:** ${interaction.user.tag}\n`
             + `**הצעה:** ${cleanMentions(suggestion.content)}`
+        );
+
+        return;
+    }
+
+    // ========================================================
+    // 🎫 REQUEST OPEN
+    // ========================================================
+
+    if (
+        id ===
+            "request_open_ban" ||
+        id ===
+            "request_open_adult" ||
+        id ===
+            "request_open_vip"
+    ) {
+
+        const type =
+            id.replace(
+                "request_open_",
+                ""
+            );
+
+        await createRequestTicket(
+            interaction,
+            type
+        );
+
+        return;
+    }
+
+    // ========================================================
+    // 🎫 REQUEST DECISIONS
+    // ========================================================
+
+    if (
+        id.startsWith(
+            "request_approve_"
+        ) ||
+        id.startsWith(
+            "request_reject_"
+        ) ||
+        id.startsWith(
+            "request_close_"
+        )
+    ) {
+
+        if (
+            !(await isStaffMember(
+                interaction.member
+            ))
+        ) {
+
+            return interaction.reply({
+
+                content:
+                    "❌ רק צוות יכול לטפל בבקשות.",
+
+                ephemeral:
+                    true
+            });
+        }
+
+        const parts =
+            id.split("_");
+
+        const action =
+            parts[1];
+
+        const type =
+            parts[2];
+
+        const channelId =
+            parts.slice(
+                3
+            ).join("_");
+
+        const request =
+            config.requests[
+                channelId
+            ];
+
+        if (!request) {
+
+            return interaction.reply({
+
+                content:
+                    "❌ הבקשה לא נמצאה.",
+
+                ephemeral:
+                    true
+            });
+        }
+
+        const requestType =
+            getRequestType(
+                type
+            );
+
+        // ====================================================
+        // 🔒 CLOSE
+        // ====================================================
+
+        if (
+            action ===
+            "close"
+        ) {
+
+            await interaction.reply(
+                "🔒 הבקשה תיסגר בעוד 5 שניות..."
+            );
+
+            await sendLog(
+
+                guild,
+
+                `🔒 בקשת ${requestType.name} נסגרה`,
+
+                `**משתמש:** <@${request.userId}>\n`
+                + `**צוות:** ${interaction.user.tag}\n`
+                + `**חדר:** ${interaction.channel.name}`
+            );
+
+            setTimeout(
+
+                async () => {
+
+                    const latest =
+                        await getGuildData(
+                            guild.id
+                        );
+
+                    delete latest.requests[
+                        channelId
+                    ];
+
+                    await saveGuildData(
+                        guild.id,
+                        latest
+                    );
+
+                    await interaction.channel
+                        .delete()
+                        .catch(
+                            () => {}
+                        );
+
+                },
+
+                5000
+            );
+
+            return;
+        }
+
+        // ====================================================
+        // אם כבר הוחלט
+        // ====================================================
+
+        if (
+            request.decided
+        ) {
+
+            return interaction.reply({
+
+                content:
+                    "❌ כבר התקבלה החלטה על הבקשה הזאת.",
+
+                ephemeral:
+                    true
+            });
+        }
+
+        const accepted =
+            action ===
+            "approve";
+
+        request.decided =
+            true;
+
+        request.status =
+            accepted
+                ? "approved"
+                : "rejected";
+
+        request.accepted =
+            accepted;
+
+        request.decidedBy =
+            interaction.user.id;
+
+        request.decidedAt =
+            Date.now();
+
+        await saveGuildData(
+            guild.id,
+            config
+        );
+
+        // ====================================================
+        // 📩 DM USER
+        // ====================================================
+
+        const requester =
+            await client.users.fetch(
+                request.userId
+            ).catch(
+                () => null
+            );
+
+        if (requester) {
+
+            const dmEmbed =
+                makeEmbed(
+
+                    guild,
+
+                    accepted
+                        ? `✅ בקשת ${requestType.name} אושרה`
+                        : `❌ בקשת ${requestType.name} נדחתה`,
+
+                    accepted
+
+                        ? `צוות ChillZone אישר את בקשת ${requestType.name} שלך. 💙`
+                        : `צוות ChillZone דחה את בקשת ${requestType.name} שלך.`
+                );
+
+            if (
+                type ===
+                "ban" &&
+                accepted
+            ) {
+
+                dmEmbed.setDescription(
+
+                    "צוות ChillZone אישר את בקשת הסרת הבאן שלך. 💙\n\n"
+                    + "שים לב: אישור הבקשה אינו מסיר את הבאן אוטומטית. "
+                    + "איש צוות צריך לבצע את הסרת הבאן בפועל."
+                );
+            }
+
+            await requester.send({
+
+                embeds: [
+                    dmEmbed
+                ]
+
+            }).catch(
+                () => {}
+            );
+        }
+
+        // ====================================================
+        // 🔵 UPDATE MESSAGE
+        // ====================================================
+
+        const resultEmbed =
+            makeEmbed(
+
+                guild,
+
+                accepted
+                    ? `✅ בקשת ${requestType.name} אושרה`
+                    : `❌ בקשת ${requestType.name} נדחתה`,
+
+                `**משתמש:** <@${request.userId}>\n\n`
+                + `**סטטוס:** ${accepted ? "אושרה ✅" : "נדחתה ❌"}\n`
+                + `**צוות:** ${interaction.user}\n\n`
+                + (
+                    type === "ban" && accepted
+                        ? "ℹ️ הבאן עצמו עדיין דורש הסרה בפועל על ידי צוות."
+                        : ""
+                )
+            );
+
+        await interaction.message.edit({
+
+            embeds: [
+                resultEmbed
+            ],
+
+            components: [
+
+                createRequestButtons(
+                    type,
+                    channelId,
+                    true
+                )
+
+            ]
+        });
+
+        await interaction.reply({
+
+            content:
+                accepted
+                    ? `✅ בקשת ${requestType.name} אושרה.`
+                    : `❌ בקשת ${requestType.name} נדחתה.`,
+
+            ephemeral:
+                true
+        });
+
+        await sendLog(
+
+            guild,
+
+            accepted
+                ? `✅ בקשת ${requestType.name} אושרה`
+                : `❌ בקשת ${requestType.name} נדחתה`,
+
+            `**משתמש:** <@${request.userId}>\n`
+            + `**צוות:** ${interaction.user.tag}\n`
+            + `**חדר:** ${interaction.channel}\n`
+            + `**סוג:** ${requestType.name}`
         );
 
         return;
@@ -3193,9 +4500,11 @@ async function sendLinksPanel(
         );
 
         await channel.send({
+
             embeds: [
                 embed
             ]
+
         });
 
         return;
@@ -3320,7 +4629,25 @@ async function handleCommand(
 
         "set-counting",
 
-        "reset-counting"
+        "reset-counting",
+
+        // ====================================================
+        // 🕖 DAILY
+        // ====================================================
+
+        "set-daily",
+
+        // ====================================================
+        // 🎫 REQUEST SYSTEM
+        // ====================================================
+
+        "set-request-category",
+
+        "ban-request-panel",
+
+        "adult-request-panel",
+
+        "vip-request-panel"
 
     ];
 
@@ -3397,7 +4724,16 @@ async function handleCommand(
 
                 + "**🔢 ספירה:**\n"
                 + "`/set-counting`\n"
-                + "`/reset-counting`"
+                + "`/reset-counting`\n\n"
+
+                + "**🕖 יומי:**\n"
+                + "`/set-daily` — שאלה וחידה כל יום ב־07:00\n\n"
+
+                + "**🎫 בקשות:**\n"
+                + "`/set-request-category`\n"
+                + "`/ban-request-panel`\n"
+                + "`/adult-request-panel`\n"
+                + "`/vip-request-panel`"
             );
 
         await interaction.reply({
@@ -4047,7 +5383,9 @@ async function handleCommand(
     ) {
 
         await sendStaffPanel(
+
             guild,
+
             interaction.channel
         );
 
@@ -4130,6 +5468,168 @@ async function handleCommand(
 
         return;
     }
+
+    // ========================================================
+    // 🕖 SET DAILY
+    // ========================================================
+
+    if (
+        interaction.commandName ===
+        "set-daily"
+    ) {
+
+        const channel =
+            interaction.options.getChannel(
+                "channel"
+            );
+
+        config.dailyChannel =
+            channel.id;
+
+        config.dailyLastDate =
+            null;
+
+        await saveGuildData(
+            guild.id,
+            config
+        );
+
+        await interaction.reply({
+
+            content:
+                `✅ חדר השאלה והחידה היומית הוגדר ל־${channel}.\n\n`
+                + "🕖 כל יום בשעה 07:00 לפי שעון ישראל תישלח שאלה וחידה חדשות.",
+
+            ephemeral:
+                true
+        });
+
+        return;
+    }
+
+    // ========================================================
+    // 🎫 REQUEST CATEGORY
+    // ========================================================
+
+    if (
+        interaction.commandName ===
+        "set-request-category"
+    ) {
+
+        const category =
+            interaction.options.getChannel(
+                "category"
+            );
+
+        config.requestCategory =
+            category.id;
+
+        await saveGuildData(
+            guild.id,
+            config
+        );
+
+        await interaction.reply({
+
+            content:
+                `✅ קטגוריית הבקשות הוגדרה ל־${category}.`,
+
+            ephemeral:
+                true
+        });
+
+        return;
+    }
+
+    // ========================================================
+    // 🚫 BAN REQUEST PANEL
+    // ========================================================
+
+    if (
+        interaction.commandName ===
+        "ban-request-panel"
+    ) {
+
+        await sendRequestPanel(
+
+            guild,
+
+            interaction.channel,
+
+            "ban"
+        );
+
+        await interaction.reply({
+
+            content:
+                "✅ פאנל בקשת הסרת באן נשלח.",
+
+            ephemeral:
+                true
+        });
+
+        return;
+    }
+
+    // ========================================================
+    // 🔞 17+ REQUEST PANEL
+    // ========================================================
+
+    if (
+        interaction.commandName ===
+        "adult-request-panel"
+    ) {
+
+        await sendRequestPanel(
+
+            guild,
+
+            interaction.channel,
+
+            "adult"
+        );
+
+        await interaction.reply({
+
+            content:
+                "✅ פאנל בקשת 17+ נשלח.",
+
+            ephemeral:
+                true
+        });
+
+        return;
+    }
+
+    // ========================================================
+    // 💎 VIP REQUEST PANEL
+    // ========================================================
+
+    if (
+        interaction.commandName ===
+        "vip-request-panel"
+    ) {
+
+        await sendRequestPanel(
+
+            guild,
+
+            interaction.channel,
+
+            "vip"
+        );
+
+        await interaction.reply({
+
+            content:
+                "✅ פאנל בקשת VIP נשלח.",
+
+            ephemeral:
+                true
+        });
+
+        return;
+    }
 }
 
 // ============================================================
@@ -4199,9 +5699,11 @@ async function handleModal(
 
         const minutes =
             parseInt(
+
                 interaction.fields.getTextInputValue(
                     "minutes"
                 )
+
             );
 
         if (
@@ -4241,6 +5743,7 @@ async function handleModal(
             minutes * 60 * 1000,
 
             `Timeout by ${interaction.user.tag}`
+
         );
 
         await interaction.reply({
@@ -4253,8 +5756,11 @@ async function handleModal(
         });
 
         await sendLog(
+
             guild,
+
             "⏱️ Timeout",
+
             `**צוות:** ${interaction.user.tag}\n`
             + `**משתמש:** ${member.user.tag}\n`
             + `**זמן:** ${minutes} דקות`
@@ -4302,8 +5808,11 @@ async function handleModal(
         });
 
         await sendLog(
+
             guild,
+
             "🔨 Ban",
+
             `**צוות:** ${interaction.user.tag}\n`
             + `**משתמש:** ${member.user.tag}\n`
             + `**ID:** ${member.id}`
@@ -4336,7 +5845,9 @@ async function handleModal(
         }
 
         await member.kick(
+
             `Kick by ${interaction.user.tag}`
+
         );
 
         await interaction.reply({
@@ -4349,8 +5860,11 @@ async function handleModal(
         });
 
         await sendLog(
+
             guild,
+
             "👢 Kick",
+
             `**צוות:** ${interaction.user.tag}\n`
             + `**משתמש:** ${member.user.tag}\n`
             + `**ID:** ${member.id}`
@@ -4419,8 +5933,11 @@ async function handleModal(
             });
 
             await sendLog(
+
                 guild,
+
                 "🔊 Mute הוסר",
+
                 `**צוות:** ${interaction.user.tag}\n`
                 + `**משתמש:** ${member.user.tag}`
             );
@@ -4441,8 +5958,11 @@ async function handleModal(
             });
 
             await sendLog(
+
                 guild,
+
                 "🔇 משתמש הושתק",
+
                 `**צוות:** ${interaction.user.tag}\n`
                 + `**משתמש:** ${member.user.tag}`
             );
@@ -4515,7 +6035,9 @@ client.on(
                 null;
 
             await saveGuildData(
+
                 message.guild.id,
+
                 config
             );
 
@@ -4533,7 +6055,9 @@ client.on(
             message.author.id;
 
         await saveGuildData(
+
             message.guild.id,
+
             config
         );
 
@@ -4626,6 +6150,7 @@ client.on(
 
         const added =
             newMember.roles.cache.filter(
+
                 role =>
                     !oldMember.roles.cache.has(
                         role.id
@@ -4634,6 +6159,7 @@ client.on(
 
         const removed =
             oldMember.roles.cache.filter(
+
                 role =>
                     !newMember.roles.cache.has(
                         role.id
@@ -4897,6 +6423,7 @@ const PORT =
 
 const server =
     http.createServer(
+
         async (
             req,
             res
@@ -4908,7 +6435,9 @@ const server =
             ) {
 
                 res.writeHead(
+
                     200,
+
                     {
                         "Content-Type":
                             "application/json"
@@ -4916,6 +6445,7 @@ const server =
                 );
 
                 res.end(
+
                     JSON.stringify({
 
                         status:
@@ -4925,6 +6455,7 @@ const server =
                             client.user
                                 ? client.user.tag
                                 : "starting"
+
                     })
                 );
 
@@ -4932,7 +6463,9 @@ const server =
             }
 
             res.writeHead(
+
                 200,
+
                 {
                     "Content-Type":
                         "text/plain; charset=utf-8"
@@ -4946,8 +6479,11 @@ const server =
     );
 
 server.listen(
+
     PORT,
+
     "0.0.0.0",
+
     () => {
 
         console.log(
