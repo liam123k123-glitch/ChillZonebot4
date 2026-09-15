@@ -1,6501 +1,3687 @@
-// ============================================================
-// 🔵 CHILLZONE COMMUNITY BOT
-// Discord.js v14 + PostgreSQL + Gemini
-// Render Ready
-// ============================================================
-
-require("dotenv").config();
-
 const {
-    Client,
-    GatewayIntentBits,
-    Partials,
-    EmbedBuilder,
-    ActionRowBuilder,
-    ButtonBuilder,
-    ButtonStyle,
-    StringSelectMenuBuilder,
-    StringSelectMenuOptionBuilder,
-    ModalBuilder,
-    TextInputBuilder,
-    TextInputStyle,
-    PermissionsBitField,
-    ChannelType,
-    SlashCommandBuilder,
-    REST,
-    Routes,
-    ActivityType
-} = require("discord.js");
+  Client,
+  GatewayIntentBits,
+  Partials,
+  EmbedBuilder,
+  ActionRowBuilder,
+  ButtonBuilder,
+  ButtonStyle,
+  StringSelectMenuBuilder,
+  ChannelType,
+  PermissionFlagsBits,
+  SlashCommandBuilder,
+  REST,
+  Routes,
+} = require('discord.js');
 
-const { Pool } = require("pg");
-const http = require("http");
+const { GoogleGenerativeAI } = require('@google/generative-ai');
+const fs = require('fs');
+const path = require('path');
 
 // ============================================================
-// 🔐 ENV
+// CHILLZONE
 // ============================================================
 
 const TOKEN = process.env.DISCORD_TOKEN;
 const CLIENT_ID = process.env.CLIENT_ID;
 const GUILD_ID = process.env.GUILD_ID;
 const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
-const DATABASE_URL = process.env.DATABASE_URL;
+const GEMINI_MODEL = process.env.GEMINI_MODEL || 'gemini-2.5-flash';
+
+const BLUE = 0x3498DB;
+const DARK_BLUE = 0x1769AA;
+const DATA_FILE = path.join(__dirname, 'chillzone-data.json');
+
+// No JavaScript template literals are used in this file.
+// This avoids the backtick parsing problem that caused the Render SyntaxError.
+function code(text) {
+  const tick = String.fromCharCode(96);
+  return tick + String(text) + tick;
+}
+
+function joinText() {
+  return Array.from(arguments).join('');
+}
+
+// ============================================================
+// ENV CHECK
+// ============================================================
 
 if (!TOKEN) {
-    console.error("❌ DISCORD_TOKEN חסר.");
-    process.exit(1);
+  console.error('DISCORD_TOKEN חסר.');
+  process.exit(1);
 }
 
 if (!CLIENT_ID) {
-    console.error("❌ CLIENT_ID חסר.");
-    process.exit(1);
+  console.error('CLIENT_ID חסר.');
+  process.exit(1);
 }
 
-if (!DATABASE_URL) {
-    console.error("❌ DATABASE_URL חסר ב-Render.");
-    process.exit(1);
-}
-
-// ============================================================
-// 🗄️ POSTGRESQL
-// ============================================================
-
-const pool = new Pool({
-    connectionString: DATABASE_URL,
-    ssl: {
-        rejectUnauthorized: false
-    }
-});
-
-async function initDatabase() {
-
-    try {
-
-        await pool.query(`
-            CREATE TABLE IF NOT EXISTS guild_settings (
-                guild_id TEXT PRIMARY KEY,
-                data JSONB NOT NULL DEFAULT '{}'::jsonb,
-                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-            )
-        `);
-
-        console.log("✅ PostgreSQL מחובר ומוכן.");
-
-    } catch (error) {
-
-        console.error(
-            "❌ PostgreSQL error:",
-            error
-        );
-
-        process.exit(1);
-    }
+if (!GEMINI_API_KEY) {
+  console.warn('GEMINI_API_KEY לא מוגדר. ה-AI לא יעבוד.');
 }
 
 // ============================================================
-// 💾 DEFAULT SETTINGS
-// ============================================================
-
-function defaultGuildData() {
-
-    return {
-
-        botImage: null,
-
-        logsChannel: null,
-
-        welcomeChannel: null,
-
-        verifyChannel: null,
-        verifyRole: null,
-
-        ticketChannel: null,
-        ticketCategory: null,
-
-        staffRole: null,
-        muteRole: null,
-
-        suggestionChannel: null,
-        suggestionStaffChannel: null,
-        suggestionRole: null,
-
-        aiChannel: null,
-        aiEnabled: true,
-
-        linksChannel: null,
-        links: [],
-
-        countingChannel: null,
-        countingNumber: 0,
-        lastCounter: null,
-
-        tickets: {},
-        suggestions: {},
-
-        helpRequests: {},
-
-        // ====================================================
-        // 🕖 DAILY
-        // ====================================================
-
-        dailyChannel: null,
-        dailyLastDate: null,
-
-        // ====================================================
-        // 🎫 REQUEST SYSTEMS
-        // ====================================================
-
-        requestCategory: null,
-        requests: {}
-    };
-}
-
-// ============================================================
-// 💾 DATABASE FUNCTIONS
-// ============================================================
-
-const guildCache = new Map();
-
-async function getGuildData(guildId) {
-
-    if (guildCache.has(guildId)) {
-        return guildCache.get(guildId);
-    }
-
-    try {
-
-        const result =
-            await pool.query(
-                `
-                SELECT data
-                FROM guild_settings
-                WHERE guild_id = $1
-                `,
-                [guildId]
-            );
-
-        if (result.rows.length === 0) {
-
-            const fresh =
-                defaultGuildData();
-
-            await pool.query(
-                `
-                INSERT INTO guild_settings
-                (guild_id, data)
-                VALUES ($1, $2::jsonb)
-                ON CONFLICT (guild_id)
-                DO NOTHING
-                `,
-                [
-                    guildId,
-                    JSON.stringify(fresh)
-                ]
-            );
-
-            guildCache.set(
-                guildId,
-                fresh
-            );
-
-            return fresh;
-        }
-
-        const saved =
-            result.rows[0].data || {};
-
-        const merged = {
-            ...defaultGuildData(),
-            ...saved
-        };
-
-        // הגנה אם שדות ישנים לא קיימים
-        if (!merged.tickets) {
-            merged.tickets = {};
-        }
-
-        if (!merged.suggestions) {
-            merged.suggestions = {};
-        }
-
-        if (!merged.helpRequests) {
-            merged.helpRequests = {};
-        }
-
-        if (!merged.links) {
-            merged.links = [];
-        }
-
-        if (!merged.requests) {
-            merged.requests = {};
-        }
-
-        guildCache.set(
-            guildId,
-            merged
-        );
-
-        return merged;
-
-    } catch (error) {
-
-        console.error(
-            "❌ getGuildData error:",
-            error
-        );
-
-        return defaultGuildData();
-    }
-}
-
-async function saveGuildData(
-    guildId,
-    guildData
-) {
-
-    try {
-
-        guildCache.set(
-            guildId,
-            guildData
-        );
-
-        await pool.query(
-            `
-            INSERT INTO guild_settings
-            (guild_id, data, updated_at)
-            VALUES ($1, $2::jsonb, CURRENT_TIMESTAMP)
-
-            ON CONFLICT (guild_id)
-            DO UPDATE SET
-                data = EXCLUDED.data,
-                updated_at = CURRENT_TIMESTAMP
-            `,
-            [
-                guildId,
-                JSON.stringify(guildData)
-            ]
-        );
-
-    } catch (error) {
-
-        console.error(
-            "❌ saveGuildData error:",
-            error
-        );
-    }
-}
-
-// ============================================================
-// 🔵 DISCORD CLIENT
+// CLIENT
 // ============================================================
 
 const client = new Client({
-
-    intents: [
-
-        GatewayIntentBits.Guilds,
-
-        GatewayIntentBits.GuildMembers,
-
-        GatewayIntentBits.GuildMessages,
-
-        GatewayIntentBits.MessageContent,
-
-        GatewayIntentBits.GuildVoiceStates
-
-    ],
-
-    partials: [
-
-        Partials.Channel,
-
-        Partials.Message,
-
-        Partials.User,
-
-        Partials.GuildMember
-
-    ]
+  intents: [
+    GatewayIntentBits.Guilds,
+    GatewayIntentBits.GuildMembers,
+    GatewayIntentBits.GuildMessages,
+    GatewayIntentBits.MessageContent,
+    GatewayIntentBits.GuildVoiceStates,
+  ],
+  partials: [Partials.Channel, Partials.Message, Partials.GuildMember],
 });
 
 // ============================================================
-// 🎨 COLORS
+// DATA
 // ============================================================
 
-const BLUE = 0x3498DB;
-
-// ============================================================
-// 🧰 HELPERS
-// ============================================================
-
-function clip(
-    text,
-    length = 1000
-) {
-
-    text =
-        String(text || "לא ידוע");
-
-    if (text.length <= length) {
-        return text;
-    }
-
-    return (
-        text.slice(
-            0,
-            length - 3
-        ) + "..."
-    );
-}
-
-function cleanMentions(text) {
-
-    return String(text || "")
-        .replace(
-            /@everyone/g,
-            "@\u200beveryone"
-        )
-        .replace(
-            /@here/g,
-            "@\u200bhere"
-        );
-}
-
-function getBotImage(guild) {
-
-    const config =
-        guild
-            ? guildCache.get(guild.id)
-            : null;
-
-    if (
-        config &&
-        config.botImage
-    ) {
-        return config.botImage;
-    }
-
-    if (client.user) {
-
-        return client.user.displayAvatarURL({
-            extension: "png",
-            size: 256
-        });
-    }
-
-    return null;
-}
-
-function makeEmbed(
-    guild,
-    title,
-    description
-) {
-
-    const embed =
-        new EmbedBuilder()
-            .setColor(BLUE)
-            .setTitle(title)
-            .setDescription(
-                description
-            )
-            .setTimestamp();
-
-    const image =
-        getBotImage(guild);
-
-    if (image) {
-        embed.setThumbnail(image);
-    }
-
-    return embed;
-}
-
-async function isStaffMember(
-    member
-) {
-
-    if (!member) {
-        return false;
-    }
-
-    if (
-        member.permissions.has(
-            PermissionsBitField.Flags.Administrator
-        )
-    ) {
-        return true;
-    }
-
-    const config =
-        await getGuildData(
-            member.guild.id
-        );
-
-    if (
-        config.staffRole &&
-        member.roles.cache.has(
-            config.staffRole
-        )
-    ) {
-        return true;
-    }
-
-    return false;
-}
-
-async function sendLog(
-    guild,
-    title,
-    description
-) {
-
-    try {
-
-        const config =
-            await getGuildData(
-                guild.id
-            );
-
-        if (!config.logsChannel) {
-            return;
-        }
-
-        const channel =
-            guild.channels.cache.get(
-                config.logsChannel
-            );
-
-        if (!channel) {
-            return;
-        }
-
-        const embed =
-            makeEmbed(
-                guild,
-                title,
-                description
-            );
-
-        await channel.send({
-            embeds: [embed]
-        });
-
-    } catch (error) {
-
-        console.error(
-            "❌ Log error:",
-            error
-        );
-    }
-}
-
-// ============================================================
-// 🕖 DAILY QUESTIONS + RIDDLES
-// ============================================================
-
-const DAILY_ITEMS = [
-
-    {
-        question: "מה הדבר הכי כיף שעשיתם השבוע? 💙",
-        riddle: "יש לי שיניים אבל אני לא נושך. מי אני?"
-    },
-
-    {
-        question: "אם הייתם יכולים לטייל בכל מקום בעולם, לאן הייתם נוסעים? 🌍",
-        riddle: "מה עולה אבל אף פעם לא יורד?"
-    },
-
-    {
-        question: "איזה משחק אתם הכי אוהבים לשחק עם חברים? 🎮",
-        riddle: "מה יש לו פנים וידיים אבל אין לו גוף?"
-    },
-
-    {
-        question: "מה המאכל שהייתם יכולים לאכול כל יום? 🍕",
-        riddle: "אני מלא חורים אבל עדיין מחזיק מים. מי אני?"
-    },
-
-    {
-        question: "אם הייתם מקבלים מיליון שקל, מה הדבר הראשון שהייתם עושים? 💰",
-        riddle: "מה נשבר בלי שנוגעים בו?"
-    },
-
-    {
-        question: "איזה כוח-על הייתם בוחרים? ⚡",
-        riddle: "מה הולך סביב העולם אבל נשאר בפינה?"
-    },
-
-    {
-        question: "מה הדבר שהכי מצחיק אתכם? 😂",
-        riddle: "יש לי צוואר אבל אין לי ראש. מה אני?"
-    },
-
-    {
-        question: "איזה סרט או סדרה אתם הכי ממליצים לראות? 🎬",
-        riddle: "מה יכול למלא חדר אבל לא תופס מקום?"
-    },
-
-    {
-        question: "מה הייתם מעדיפים: חופשה או כסף? 🏖️",
-        riddle: "מה יש לו הרבה מילים אבל אף פעם לא מדבר?"
-    },
-
-    {
-        question: "איזה שיר אתם הכי אוהבים כרגע? 🎵",
-        riddle: "מה רץ אבל אף פעם לא הולך?"
-    },
-
-    {
-        question: "מה המשחק הראשון ששיחקתם בו? 🎮",
-        riddle: "מה שייך לך אבל אנשים אחרים משתמשים בו יותר ממך?"
-    },
-
-    {
-        question: "אם הייתם יכולים לפגוש דמות ממשחק, מי זאת הייתה? 👀",
-        riddle: "מה יש באמצע של פריז?"
-    },
-
-    {
-        question: "מה הייתם מעדיפים: ים או בריכה? 🌊",
-        riddle: "איזה חודש יש בו 28 ימים?"
-    },
-
-    {
-        question: "מה הדבר הכי חשוב לדעתכם בקהילה טובה? 💙",
-        riddle: "מה נהיה רטוב יותר ככל שהוא מייבש?"
-    },
-
-    {
-        question: "מה הייתם רוצים שיוסיפו ל-ChillZone? 🔵",
-        riddle: "מה אפשר לתפוס אבל אי אפשר לזרוק?"
-    },
-
-    {
-        question: "מה התחביב שהכי הייתם רוצים להתחיל? ⭐",
-        riddle: "מה יש לו עין אחת אבל הוא לא רואה?"
-    },
-
-    {
-        question: "איזה יעד הייתם רוצים להשיג השנה? 🏆",
-        riddle: "מה עולה ויורד אבל נשאר באותו מקום?"
-    },
-
-    {
-        question: "מי במשחקים שלכם תמיד הכי מצחיק אתכם? 😂",
-        riddle: "מה יש לו ראש וזנב אבל אין לו גוף?"
-    },
-
-    {
-        question: "מה הייתם בוחרים: להיות הכי טוב במשחק אחד או טוב בהרבה משחקים? 🎮",
-        riddle: "מה אפשר לשבור רק במילה?"
-    },
-
-    {
-        question: "איזה אירוע הייתם רוצים לראות בשרת? 🔵",
-        riddle: "מה עובר דרך ערים ושדות אבל אף פעם לא זז?"
-    }
-
-];
-
-function getIsraelDateInfo() {
-
-    const now =
-        new Date();
-
-    const formatter =
-        new Intl.DateTimeFormat(
-            "en-GB",
-            {
-                timeZone: "Asia/Jerusalem",
-                year: "numeric",
-                month: "2-digit",
-                day: "2-digit",
-                hour: "2-digit",
-                minute: "2-digit",
-                hourCycle: "h23"
-            }
-        );
-
-    const parts =
-        formatter
-            .formatToParts(now);
-
-    const values = {};
-
-    for (const part of parts) {
-        values[part.type] =
-            part.value;
-    }
-
-    return {
-
-        date:
-            `${values.year}-${values.month}-${values.day}`,
-
-        hour:
-            Number(values.hour),
-
-        minute:
-            Number(values.minute)
-    };
-}
-
-function getDailyItem(dateString) {
-
-    let hash = 0;
-
-    for (
-        let i = 0;
-        i < dateString.length;
-        i++
-    ) {
-
-        hash =
-            (
-                (
-                    hash << 5
-                ) -
-                hash +
-                dateString.charCodeAt(i)
-            ) |
-            0;
-    }
-
-    const index =
-        Math.abs(hash) %
-        DAILY_ITEMS.length;
-
-    return DAILY_ITEMS[index];
-}
-
-async function checkDailyMessages() {
-
-    try {
-
-        const time =
-            getIsraelDateInfo();
-
-        // שולח רק במהלך הדקה 07:00
-        if (
-            time.hour !== 7 ||
-            time.minute !== 0
-        ) {
-            return;
-        }
-
-        for (
-            const guild of
-                client.guilds.cache.values()
-        ) {
-
-            const config =
-                await getGuildData(
-                    guild.id
-                );
-
-            if (!config.dailyChannel) {
-                continue;
-            }
-
-            if (
-                config.dailyLastDate ===
-                time.date
-            ) {
-                continue;
-            }
-
-            const channel =
-                guild.channels.cache.get(
-                    config.dailyChannel
-                );
-
-            if (!channel) {
-                continue;
-            }
-
-            const item =
-                getDailyItem(
-                    time.date
-                );
-
-            const embed =
-                makeEmbed(
-
-                    guild,
-
-                    "🌅 ChillZone — יום חדש!",
-
-                    "בוקר טוב לקהילה! 💙\n\n"
-                    + "💬 **השאלה היומית:**\n"
-                    + `${item.question}\n\n`
-                    + "🧩 **החידה היומית:**\n"
-                    + `${item.riddle}\n\n`
-                    + "יאללה, מחכים לתשובות שלכם! 🔵"
-                );
-
-            await channel.send({
-                embeds: [embed]
-            });
-
-            config.dailyLastDate =
-                time.date;
-
-            await saveGuildData(
-                guild.id,
-                config
-            );
-
-            await sendLog(
-                guild,
-                "🌅 שאלה וחידה יומית נשלחו",
-                `**חדר:** ${channel}\n`
-                + `**תאריך:** ${time.date}`
-            );
-        }
-
-    } catch (error) {
-
-        console.error(
-            "❌ Daily system error:",
-            error
-        );
-    }
-}
-
-// ============================================================
-// 🎫 REQUEST SYSTEM
-// ============================================================
-
-const REQUEST_TYPES = {
-
-    ban: {
-        name: "הסרת באן",
-        emoji: "🚫",
-        description: "בקשה לבדיקה של Ban"
-    },
-
-    adult: {
-        name: "17+",
-        emoji: "🔞",
-        description: "בקשת גישה למערכת 17+"
-    },
-
-    vip: {
-        name: "VIP",
-        emoji: "💎",
-        description: "בקשת VIP"
-    }
-
+let data = {
+  guilds: {},
+  levels: {},
+  tickets: {},
+  privateRooms: {},
+  punishments: {},
+  counting: {},
+  requests: {},
 };
 
-function getRequestType(
-    type
-) {
-
-    return REQUEST_TYPES[type] ||
-        REQUEST_TYPES.ban;
+function normalizeData() {
+  if (!data || typeof data !== 'object') data = {};
+  if (!data.guilds || typeof data.guilds !== 'object') data.guilds = {};
+  if (!data.levels || typeof data.levels !== 'object') data.levels = {};
+  if (!data.tickets || typeof data.tickets !== 'object') data.tickets = {};
+  if (!data.privateRooms || typeof data.privateRooms !== 'object') data.privateRooms = {};
+  if (!data.punishments || typeof data.punishments !== 'object') data.punishments = {};
+  if (!data.counting || typeof data.counting !== 'object') data.counting = {};
+  if (!data.requests || typeof data.requests !== 'object') data.requests = {};
 }
 
-function createRequestButtons(
-    type,
-    channelId,
-    decided = false
-) {
-
-    const buttons = [];
-
-    buttons.push(
-
-        new ButtonBuilder()
-            .setCustomId(
-                `request_approve_${type}_${channelId}`
-            )
-            .setLabel(
-                "אישור"
-            )
-            .setEmoji(
-                "✅"
-            )
-            .setStyle(
-                ButtonStyle.Primary
-            )
-            .setDisabled(
-                decided
-            )
-    );
-
-    buttons.push(
-
-        new ButtonBuilder()
-            .setCustomId(
-                `request_reject_${type}_${channelId}`
-            )
-            .setLabel(
-                "דחייה"
-            )
-            .setEmoji(
-                "❌"
-            )
-            .setStyle(
-                ButtonStyle.Danger
-            )
-            .setDisabled(
-                decided
-            )
-    );
-
-    buttons.push(
-
-        new ButtonBuilder()
-            .setCustomId(
-                `request_close_${type}_${channelId}`
-            )
-            .setLabel(
-                "סגור"
-            )
-            .setEmoji(
-                "🔒"
-            )
-            .setStyle(
-                ButtonStyle.Secondary
-            )
-    );
-
-    return new ActionRowBuilder()
-        .addComponents(
-            buttons
-        );
-}
-
-async function sendRequestPanel(
-    guild,
-    channel,
-    type
-) {
-
-    const request =
-        getRequestType(type);
-
-    const embed =
-        makeEmbed(
-
-            guild,
-
-            `${request.emoji} בקשת ${request.name}`,
-
-            `צריך לפתוח בקשה בנושא **${request.name}**?\n\n`
-            + `${request.emoji} ${request.description}\n\n`
-            + "לחץ על הכפתור למטה כדי לפתוח בקשה פרטית.\n"
-            + "הבקשה תגיע לצוות לבדיקה.\n\n"
-            + "🛡️ רק אתה והצוות יוכלו לראות את החדר."
-        );
-
-    const row =
-        new ActionRowBuilder()
-            .addComponents(
-
-                new ButtonBuilder()
-                    .setCustomId(
-                        `request_open_${type}`
-                    )
-                    .setLabel(
-                        `בקשת ${request.name}`
-                    )
-                    .setEmoji(
-                        request.emoji
-                    )
-                    .setStyle(
-                        ButtonStyle.Primary
-                    )
-            );
-
-    await channel.send({
-
-        embeds: [
-            embed
-        ],
-
-        components: [
-            row
-        ]
-    });
-}
-
-async function createRequestTicket(
-    interaction,
-    type
-) {
-
-    const guild =
-        interaction.guild;
-
-    const member =
-        interaction.member;
-
-    const config =
-        await getGuildData(
-            guild.id
-        );
-
-    const requestType =
-        getRequestType(type);
-
-    if (!config.requestCategory) {
-
-        return interaction.reply({
-
-            content:
-                "❌ קטגוריית הבקשות עדיין לא הוגדרה.\n"
-                + "השתמש ב־`/set-request-category`.",
-
-            ephemeral:
-                true
-        });
+function loadData() {
+  try {
+    if (fs.existsSync(DATA_FILE)) {
+      const raw = fs.readFileSync(DATA_FILE, 'utf8');
+      data = JSON.parse(raw);
+      normalizeData();
     }
-
-    if (!config.staffRole) {
-
-        return interaction.reply({
-
-            content:
-                "❌ Staff Role עדיין לא הוגדר.\n"
-                + "השתמש ב־`/set-staff`.",
-
-            ephemeral:
-                true
-        });
-    }
-
-    const category =
-        guild.channels.cache.get(
-            config.requestCategory
-        );
-
-    if (
-        !category ||
-        category.type !== ChannelType.GuildCategory
-    ) {
-
-        return interaction.reply({
-
-            content:
-                "❌ קטגוריית הבקשות לא נמצאה.",
-
-            ephemeral:
-                true
-        });
-    }
-
-    // ========================================================
-    // בדיקת בקשה קיימת מאותו סוג
-    // ========================================================
-
-    const existing =
-        Object.entries(
-            config.requests || {}
-        ).find(
-            ([channelId, request]) =>
-                request.userId === member.id &&
-                request.type === type &&
-                request.status === "open"
-        );
-
-    if (existing) {
-
-        const oldChannel =
-            guild.channels.cache.get(
-                existing[0]
-            );
-
-        if (oldChannel) {
-
-            return interaction.reply({
-
-                content:
-                    `❌ כבר יש לך בקשת ${requestType.name} פתוחה: ${oldChannel}`,
-
-                ephemeral:
-                    true
-            });
-        }
-
-        delete config.requests[
-            existing[0]
-        ];
-
-        await saveGuildData(
-            guild.id,
-            config
-        );
-    }
-
-    const safeUsername =
-        member.user.username
-            .toLowerCase()
-            .replace(
-                /[^a-z0-9]/g,
-                ""
-            )
-            .slice(
-                0,
-                15
-            ) ||
-        "user";
-
-    const channelName =
-        `request-${type}-${safeUsername}`;
-
-    const overwrites = [
-
-        {
-            id:
-                guild.roles.everyone.id,
-
-            deny: [
-                PermissionsBitField.Flags.ViewChannel
-            ]
-        },
-
-        {
-            id:
-                member.id,
-
-            allow: [
-
-                PermissionsBitField.Flags.ViewChannel,
-
-                PermissionsBitField.Flags.SendMessages,
-
-                PermissionsBitField.Flags.ReadMessageHistory
-
-            ]
-        },
-
-        {
-            id:
-                config.staffRole,
-
-            allow: [
-
-                PermissionsBitField.Flags.ViewChannel,
-
-                PermissionsBitField.Flags.SendMessages,
-
-                PermissionsBitField.Flags.ReadMessageHistory
-
-            ]
-        }
-
-    ];
-
-    const channel =
-        await guild.channels.create({
-
-            name:
-                channelName,
-
-            type:
-                ChannelType.GuildText,
-
-            parent:
-                category.id,
-
-            permissionOverwrites:
-                overwrites
-        });
-
-    config.requests[
-        channel.id
-    ] = {
-
-        userId:
-            member.id,
-
-        type:
-            type,
-
-        status:
-            "open",
-
-        decided:
-            false,
-
-        accepted:
-            null,
-
-        decidedBy:
-            null,
-
-        createdAt:
-            Date.now()
+  } catch (error) {
+    console.error('Failed loading data:', error);
+    data = {
+      guilds: {},
+      levels: {},
+      tickets: {},
+      privateRooms: {},
+      punishments: {},
+      counting: {},
+      requests: {},
     };
+  }
+}
 
-    await saveGuildData(
-        guild.id,
-        config
-    );
+function saveData() {
+  try {
+    normalizeData();
+    fs.writeFileSync(DATA_FILE, JSON.stringify(data, null, 2), 'utf8');
+  } catch (error) {
+    console.error('Failed saving data:', error);
+  }
+}
 
-    const embed =
-        makeEmbed(
+loadData();
 
-            guild,
+// ============================================================
+// CONFIG
+// ============================================================
 
-            `${requestType.emoji} בקשת ${requestType.name}`,
+function defaultConfig() {
+  return {
+    autoRole: null,
+    staffRole: null,
+    chatMuteRole: null,
+    voiceMuteRole: null,
+    banRole: null,
+    vipRole: null,
+    adultRole: null,
+    welcomeChannel: null,
+    logsChannel: null,
+    aiChannel: null,
+    countingChannel: null,
+    suggestionsChannel: null,
+    levelChannel: null,
+    dailyQuestionChannel: null,
+    dailyRiddleChannel: null,
+    dailyQuestionLastDate: null,
+    dailyRiddleLastDate: null,
+    requestCategory: null,
+    ticketCategory: null,
+    privateCategory: null,
+  };
+}
 
-            `שלום ${member}! 👋\n\n`
-            + `הבקשה שלך בנושא **${requestType.name}** נפתחה.\n`
-            + "איש צוות יטפל בבקשה.\n\n"
-            + "🤖 **AI אינו פעיל בחדר הזה.**\n"
-            + "🛡️ רק אתה והצוות יכולים לראות את החדר."
-        );
-
-    embed.addFields({
-
-        name:
-            "👤 מגיש הבקשה",
-
-        value:
-            `${member}\n\`${member.id}\``,
-
-        inline:
-            true
-    });
-
-    embed.addFields({
-
-        name:
-            "📌 סטטוס",
-
-        value:
-            "🟡 ממתין לבדיקה",
-
-        inline:
-            true
-    });
-
-    await channel.send({
-
-        content:
-            `<@&${config.staffRole}> ${member}`,
-
-        embeds: [
-            embed
-        ],
-
-        components: [
-            createRequestButtons(
-                type,
-                channel.id,
-                false
-            )
-        ]
-    });
-
-    await interaction.reply({
-
-        content:
-            `✅ בקשת ${requestType.name} נפתחה: ${channel}`,
-
-        ephemeral:
-            true
-    });
-
-    await sendLog(
-
-        guild,
-
-        `${requestType.emoji} בקשת ${requestType.name} נפתחה`,
-
-        `**משתמש:** ${member.user.tag}\n`
-        + `**ID:** ${member.id}\n`
-        + `**חדר:** ${channel}\n`
-        + `**סוג:** ${requestType.name}`
-    );
+function getConfig(guildId) {
+  if (!data.guilds[guildId] || typeof data.guilds[guildId] !== 'object') {
+    data.guilds[guildId] = defaultConfig();
+    saveData();
+  } else {
+    const defaults = defaultConfig();
+    for (const key of Object.keys(defaults)) {
+      if (!(key in data.guilds[guildId])) data.guilds[guildId][key] = defaults[key];
+    }
+  }
+  return data.guilds[guildId];
 }
 
 // ============================================================
-// 📜 SLASH COMMANDS
+// EMBEDS
+// ============================================================
+
+function embed(title, description) {
+  return new EmbedBuilder()
+    .setColor(BLUE)
+    .setTitle('💙 ' + title)
+    .setDescription(String(description))
+    .setTimestamp()
+    .setFooter({ text: 'ChillZone • Community Bot' });
+}
+
+function successEmbed(title, description) {
+  return new EmbedBuilder()
+    .setColor(BLUE)
+    .setTitle('✅ ' + title)
+    .setDescription(String(description))
+    .setTimestamp()
+    .setFooter({ text: 'ChillZone • Community' });
+}
+
+// ============================================================
+// STAFF
+// ============================================================
+
+function isStaff(member) {
+  if (!member) return false;
+  if (member.permissions && member.permissions.has(PermissionFlagsBits.Administrator)) return true;
+
+  const config = getConfig(member.guild.id);
+  return Boolean(config.staffRole && member.roles.cache.has(config.staffRole));
+}
+
+// ============================================================
+// LOGS
+// ============================================================
+
+async function sendLog(guild, title, description) {
+  try {
+    const config = getConfig(guild.id);
+    if (!config.logsChannel) return;
+
+    const channel = guild.channels.cache.get(config.logsChannel);
+    if (!channel || !channel.isTextBased()) return;
+
+    await channel.send({ embeds: [embed(title, description)] });
+  } catch (error) {
+    console.error('Log error:', error.message || error);
+  }
+}
+
+// ============================================================
+// DURATION
+// ============================================================
+
+function parseDuration(input) {
+  if (!input) return null;
+
+  const match = /^(\d+)(s|m|h|d|w)$/i.exec(String(input).trim());
+  if (!match) return null;
+
+  const amount = Number(match[1]);
+  const unit = match[2].toLowerCase();
+  const units = {
+    s: 1000,
+    m: 60000,
+    h: 3600000,
+    d: 86400000,
+    w: 604800000,
+  };
+
+  if (!units[unit] || !Number.isFinite(amount) || amount <= 0) return null;
+  return amount * units[unit];
+}
+
+function safeChannelName(prefix, username) {
+  const clean = String(username || 'user')
+    .toLowerCase()
+    .replace(/[^a-z0-9-]/g, '')
+    .slice(0, 50);
+  return (prefix + '-' + (clean || 'user')).slice(0, 90);
+}
+
+// ============================================================
+// COMMANDS
 // ============================================================
 
 const commands = [
+  new SlashCommandBuilder()
+    .setName('setup')
+    .setDescription('מרכז ההגדרות של ChillZone'),
 
-    new SlashCommandBuilder()
-        .setName("setup")
-        .setDescription("מציג את כל הגדרות הבוט"),
+  new SlashCommandBuilder()
+    .setName('config')
+    .setDescription('הגדרת הבוט')
+    .addSubcommand(function (sub) {
+      return sub
+        .setName('role')
+        .setDescription('הגדרת רול')
+        .addStringOption(function (option) {
+          return option
+            .setName('type')
+            .setDescription('סוג הרול')
+            .setRequired(true)
+            .addChoices(
+              { name: 'Auto Role', value: 'autoRole' },
+              { name: 'Staff', value: 'staffRole' },
+              { name: 'Chat Mute', value: 'chatMuteRole' },
+              { name: 'Voice Mute', value: 'voiceMuteRole' },
+              { name: 'Ban', value: 'banRole' },
+              { name: 'VIP', value: 'vipRole' },
+              { name: '17+', value: 'adultRole' }
+            );
+        })
+        .addRoleOption(function (option) {
+          return option.setName('role').setDescription('הרול').setRequired(true);
+        });
+    })
+    .addSubcommand(function (sub) {
+      return sub
+        .setName('channel')
+        .setDescription('הגדרת חדר')
+        .addStringOption(function (option) {
+          return option
+            .setName('type')
+            .setDescription('סוג החדר')
+            .setRequired(true)
+            .addChoices(
+              { name: 'Welcome', value: 'welcomeChannel' },
+              { name: 'Logs', value: 'logsChannel' },
+              { name: 'AI', value: 'aiChannel' },
+              { name: 'Counting', value: 'countingChannel' },
+              { name: 'Suggestions', value: 'suggestionsChannel' },
+              { name: 'Levels', value: 'levelChannel' },
+              { name: 'Daily Question', value: 'dailyQuestionChannel' },
+              { name: 'Daily Riddle', value: 'dailyRiddleChannel' }
+            );
+        })
+        .addChannelOption(function (option) {
+          return option
+            .setName('channel')
+            .setDescription('החדר')
+            .setRequired(true)
+            .addChannelTypes(ChannelType.GuildText, ChannelType.GuildAnnouncement);
+        });
+    })
+    .addSubcommand(function (sub) {
+      return sub
+        .setName('category')
+        .setDescription('הגדרת קטגוריה')
+        .addStringOption(function (option) {
+          return option
+            .setName('type')
+            .setDescription('סוג קטגוריה')
+            .setRequired(true)
+            .addChoices(
+              { name: 'Tickets', value: 'ticketCategory' },
+              { name: 'Private Rooms', value: 'privateCategory' },
+              { name: 'Requests', value: 'requestCategory' }
+            );
+        })
+        .addChannelOption(function (option) {
+          return option
+            .setName('channel')
+            .setDescription('הקטגוריה')
+            .setRequired(true)
+            .addChannelTypes(ChannelType.GuildCategory);
+        });
+    }),
 
-    new SlashCommandBuilder()
-        .setName("set-image")
-        .setDescription("הגדרת תמונת הבוט")
-        .addStringOption(option =>
-            option
-                .setName("url")
-                .setDescription("קישור ישיר לתמונה")
-                .setRequired(true)
-        ),
+  new SlashCommandBuilder()
+    .setName('chatmute')
+    .setDescription('Chat Mute זמני')
+    .addUserOption(function (option) {
+      return option.setName('user').setDescription('משתמש').setRequired(true);
+    })
+    .addStringOption(function (option) {
+      return option.setName('time').setDescription('לדוגמה: 10m / 1h / 7d').setRequired(true);
+    })
+    .addStringOption(function (option) {
+      return option.setName('reason').setDescription('סיבה');
+    }),
 
-    new SlashCommandBuilder()
-        .setName("set-logs")
-        .setDescription("הגדרת חדר לוגים")
-        .addChannelOption(option =>
-            option
-                .setName("channel")
-                .setDescription("חדר הלוגים")
-                .setRequired(true)
-                .addChannelTypes(
-                    ChannelType.GuildText
-                )
-        ),
+  new SlashCommandBuilder()
+    .setName('voicemute')
+    .setDescription('Voice Mute זמני')
+    .addUserOption(function (option) {
+      return option.setName('user').setDescription('משתמש').setRequired(true);
+    })
+    .addStringOption(function (option) {
+      return option.setName('time').setDescription('לדוגמה: 10m / 1h / 7d').setRequired(true);
+    })
+    .addStringOption(function (option) {
+      return option.setName('reason').setDescription('סיבה');
+    }),
 
-    new SlashCommandBuilder()
-        .setName("set-staff")
-        .setDescription("הגדרת Staff Role")
-        .addRoleOption(option =>
-            option
-                .setName("role")
-                .setDescription("רול הצוות")
-                .setRequired(true)
-        ),
+  new SlashCommandBuilder()
+    .setName('ban')
+    .setDescription('Ban Role זמני')
+    .addUserOption(function (option) {
+      return option.setName('user').setDescription('משתמש').setRequired(true);
+    })
+    .addStringOption(function (option) {
+      return option.setName('time').setDescription('לדוגמה: 10m / 1h / 7d').setRequired(true);
+    })
+    .addStringOption(function (option) {
+      return option.setName('reason').setDescription('סיבה');
+    }),
 
-    new SlashCommandBuilder()
-        .setName("set-mute")
-        .setDescription("הגדרת Mute Role")
-        .addRoleOption(option =>
-            option
-                .setName("role")
-                .setDescription("רול ההשתקה")
-                .setRequired(true)
-        ),
+  new SlashCommandBuilder()
+    .setName('ticket-panel')
+    .setDescription('שליחת פאנל טיקטים'),
 
-    new SlashCommandBuilder()
-        .setName("set-ai")
-        .setDescription("הגדרת חדר ה-AI")
-        .addChannelOption(option =>
-            option
-                .setName("channel")
-                .setDescription("חדר שבו הבוט יענה ב-AI")
-                .setRequired(true)
-                .addChannelTypes(
-                    ChannelType.GuildText
-                )
-        ),
+  new SlashCommandBuilder()
+    .setName('private-panel')
+    .setDescription('שליחת פאנל חדרים פרטיים'),
 
-    new SlashCommandBuilder()
-        .setName("set-ticket-category")
-        .setDescription("הגדרת קטגוריית הטיקטים")
-        .addChannelOption(option =>
-            option
-                .setName("category")
-                .setDescription("קטגוריית הטיקטים")
-                .setRequired(true)
-                .addChannelTypes(
-                    ChannelType.GuildCategory
-                )
-        ),
+  new SlashCommandBuilder()
+    .setName('roles-panel')
+    .setDescription('שליחת פאנל רולים'),
 
-    new SlashCommandBuilder()
-        .setName("set-ticket-channel")
-        .setDescription("הגדרת חדר פאנל הטיקטים")
-        .addChannelOption(option =>
-            option
-                .setName("channel")
-                .setDescription("חדר הפאנל")
-                .setRequired(true)
-                .addChannelTypes(
-                    ChannelType.GuildText
-                )
-        ),
+  new SlashCommandBuilder()
+    .setName('ban-request-panel')
+    .setDescription('שליחת פאנל בקשת הסרת Ban'),
 
-    new SlashCommandBuilder()
-        .setName("ticket-panel")
-        .setDescription("שליחת פאנל טיקטים"),
+  new SlashCommandBuilder()
+    .setName('adult-request-panel')
+    .setDescription('שליחת פאנל בקשת 17+'),
 
-    new SlashCommandBuilder()
-        .setName("staff-panel")
-        .setDescription("שליחת פאנל צוות"),
+  new SlashCommandBuilder()
+    .setName('vip-request-panel')
+    .setDescription('שליחת פאנל בקשת VIP'),
 
-    new SlashCommandBuilder()
-        .setName("set-verify")
-        .setDescription("הגדרת מערכת אימות")
-        .addChannelOption(option =>
-            option
-                .setName("channel")
-                .setDescription("חדר האימות")
-                .setRequired(true)
-                .addChannelTypes(
-                    ChannelType.GuildText
-                )
-        )
-        .addRoleOption(option =>
-            option
-                .setName("role")
-                .setDescription("הרול שמקבלים")
-                .setRequired(true)
-        ),
+  new SlashCommandBuilder()
+    .setName('drop')
+    .setDescription('יצירת Drop')
+    .addRoleOption(function (option) {
+      return option.setName('role').setDescription('הרול').setRequired(true);
+    }),
 
-    new SlashCommandBuilder()
-        .setName("verify-panel")
-        .setDescription("שליחת פאנל אימות"),
+  new SlashCommandBuilder()
+    .setName('counting')
+    .setDescription('הגדרת חדר ספירה')
+    .addChannelOption(function (option) {
+      return option
+        .setName('channel')
+        .setDescription('חדר הספירה')
+        .setRequired(true)
+        .addChannelTypes(ChannelType.GuildText);
+    }),
 
-    new SlashCommandBuilder()
-        .setName("set-welcome")
-        .setDescription("הגדרת חדר ברוכים הבאים")
-        .addChannelOption(option =>
-            option
-                .setName("channel")
-                .setDescription("חדר Welcome")
-                .setRequired(true)
-                .addChannelTypes(
-                    ChannelType.GuildText
-                )
-        ),
+  new SlashCommandBuilder()
+    .setName('level')
+    .setDescription('בדיקת רמה')
+    .addUserOption(function (option) {
+      return option.setName('user').setDescription('משתמש');
+    }),
 
-    new SlashCommandBuilder()
-        .setName("set-suggestions")
-        .setDescription("הגדרת מערכת ההצעות")
-        .addChannelOption(option =>
-            option
-                .setName("channel")
-                .setDescription("חדר ההצעות")
-                .setRequired(true)
-                .addChannelTypes(
-                    ChannelType.GuildText
-                )
-        )
-        .addChannelOption(option =>
-            option
-                .setName("staffchannel")
-                .setDescription("חדר צוות ההצעות")
-                .setRequired(true)
-                .addChannelTypes(
-                    ChannelType.GuildText
-                )
-        )
-        .addRoleOption(option =>
-            option
-                .setName("role")
-                .setDescription("הרול שיתויג בכל הצעה")
-                .setRequired(true)
-        ),
-
-    new SlashCommandBuilder()
-        .setName("set-links")
-        .setDescription("הגדרת חדר הקישורים")
-        .addChannelOption(option =>
-            option
-                .setName("channel")
-                .setDescription("חדר הקישורים")
-                .setRequired(true)
-                .addChannelTypes(
-                    ChannelType.GuildText
-                )
-        ),
-
-    new SlashCommandBuilder()
-        .setName("add-link")
-        .setDescription("הוספת קישור")
-        .addStringOption(option =>
-            option
-                .setName("name")
-                .setDescription("שם הקישור")
-                .setRequired(true)
-        )
-        .addStringOption(option =>
-            option
-                .setName("url")
-                .setDescription("הקישור")
-                .setRequired(true)
-        ),
-
-    new SlashCommandBuilder()
-        .setName("clear-links")
-        .setDescription("מחיקת כל הקישורים"),
-
-    new SlashCommandBuilder()
-        .setName("links-panel")
-        .setDescription("שליחת פאנל קישורים"),
-
-    new SlashCommandBuilder()
-        .setName("set-counting")
-        .setDescription("הגדרת חדר ספירה")
-        .addChannelOption(option =>
-            option
-                .setName("channel")
-                .setDescription("חדר הספירה")
-                .setRequired(true)
-                .addChannelTypes(
-                    ChannelType.GuildText
-                )
-        ),
-
-    new SlashCommandBuilder()
-        .setName("reset-counting")
-        .setDescription("איפוס הספירה"),
-
-    // ========================================================
-    // 🕖 DAILY
-    // ========================================================
-
-    new SlashCommandBuilder()
-        .setName("set-daily")
-        .setDescription("הגדרת חדר שאלה וחידה יומית")
-        .addChannelOption(option =>
-            option
-                .setName("channel")
-                .setDescription("החדר שבו יישלחו השאלה והחידה")
-                .setRequired(true)
-                .addChannelTypes(
-                    ChannelType.GuildText
-                )
-        ),
-
-    // ========================================================
-    // 🎫 REQUEST CATEGORY
-    // ========================================================
-
-    new SlashCommandBuilder()
-        .setName("set-request-category")
-        .setDescription("הגדרת קטגוריית בקשות")
-        .addChannelOption(option =>
-            option
-                .setName("category")
-                .setDescription("קטגוריית חדרי הבקשות")
-                .setRequired(true)
-                .addChannelTypes(
-                    ChannelType.GuildCategory
-                )
-        ),
-
-    // ========================================================
-    // 🚫 BAN REQUEST
-    // ========================================================
-
-    new SlashCommandBuilder()
-        .setName("ban-request-panel")
-        .setDescription("שליחת פאנל בקשת הסרת באן"),
-
-    // ========================================================
-    // 🔞 17+ REQUEST
-    // ========================================================
-
-    new SlashCommandBuilder()
-        .setName("adult-request-panel")
-        .setDescription("שליחת פאנל בקשת 17+"),
-
-    // ========================================================
-    // 💎 VIP REQUEST
-    // ========================================================
-
-    new SlashCommandBuilder()
-        .setName("vip-request-panel")
-        .setDescription("שליחת פאנל בקשת VIP")
-
-].map(command =>
-    command.toJSON()
-);
+  new SlashCommandBuilder()
+    .setName('help')
+    .setDescription('מרכז העזרה'),
+].map(function (command) {
+  return command.toJSON();
+});
 
 // ============================================================
-// 📡 REGISTER COMMANDS
+// REGISTER
 // ============================================================
 
 async function registerCommands() {
-
-    try {
-
-        const rest =
-            new REST({
-                version: "10"
-            }).setToken(TOKEN);
-
-        if (GUILD_ID) {
-
-            await rest.put(
-
-                Routes.applicationGuildCommands(
-                    CLIENT_ID,
-                    GUILD_ID
-                ),
-
-                {
-                    body:
-                        commands
-                }
-            );
-
-            console.log(
-                "✅ Slash commands registered to guild."
-            );
-
-        } else {
-
-            await rest.put(
-
-                Routes.applicationCommands(
-                    CLIENT_ID
-                ),
-
-                {
-                    body:
-                        commands
-                }
-            );
-
-            console.log(
-                "✅ Global Slash commands registered."
-            );
-        }
-
-    } catch (error) {
-
-        console.error(
-            "❌ Command registration error:",
-            error
-        );
-    }
-}
-
-// ============================================================
-// 🟢 READY
-// ============================================================
-
-client.once(
-    "ready",
-    async () => {
-
-        console.log(
-            `🔵 ChillZone מחובר בתור ${client.user.tag}`
-        );
-
-        client.user.setPresence({
-
-            activities: [
-
-                {
-                    name:
-                        "ChillZone 🔵",
-
-                    type:
-                        ActivityType.Watching
-                }
-
-            ],
-
-            status:
-                "online"
-        });
-
-        await initDatabase();
-
-        for (
-            const guild of
-                client.guilds.cache.values()
-        ) {
-
-            await getGuildData(
-                guild.id
-            );
-        }
-
-        await registerCommands();
-
-        // ====================================================
-        // 🕖 DAILY CHECK
-        // ====================================================
-
-        setInterval(
-            checkDailyMessages,
-            30 * 1000
-        );
-
-        console.log(
-            "🕖 מערכת השאלה והחידה היומית פעילה."
-        );
-    }
-);
-
-// ============================================================
-// 👋 WELCOME
-// ============================================================
-
-client.on(
-    "guildMemberAdd",
-    async member => {
-
-        try {
-
-            const config =
-                await getGuildData(
-                    member.guild.id
-                );
-
-            if (
-                config.welcomeChannel
-            ) {
-
-                const channel =
-                    member.guild.channels.cache.get(
-                        config.welcomeChannel
-                    );
-
-                if (channel) {
-
-                    const embed =
-                        makeEmbed(
-
-                            member.guild,
-
-                            "👋 ברוכים הבאים ל־ChillZone!",
-
-                            `היי ${member}! 👋\n\n`
-                            + `שמחים שהצטרפת לקהילה שלנו 💙\n`
-                            + `תיהנה, תכיר אנשים ותשתתף בקהילה!`
-                        );
-
-                    await channel.send({
-
-                        content:
-                            `${member}`,
-
-                        embeds: [
-                            embed
-                        ]
-                    });
-                }
-            }
-
-            await sendLog(
-
-                member.guild,
-
-                "👋 משתמש נכנס",
-
-                `**משתמש:** ${member.user.tag}\n`
-                + `**ID:** ${member.id}`
-            );
-
-        } catch (error) {
-
-            console.error(
-                "Welcome error:",
-                error
-            );
-        }
-    }
-);
-
-// ============================================================
-// 🚪 MEMBER LEAVE
-// ============================================================
-
-client.on(
-    "guildMemberRemove",
-    async member => {
-
-        await sendLog(
-
-            member.guild,
-
-            "🚪 משתמש יצא",
-
-            `**משתמש:** ${member.user?.tag || "לא ידוע"}\n`
-            + `**ID:** ${member.id}`
-        );
-    }
-);
-
-// ============================================================
-// 🔐 VERIFY PANEL
-// ============================================================
-
-async function sendVerifyPanel(
-    guild,
-    channel
-) {
-
-    const embed =
-        makeEmbed(
-
-            guild,
-
-            "🔐 אימות ChillZone",
-
-            "ברוכים הבאים לשרת! 💙\n\n"
-            + "לחץ על הכפתור למטה כדי לאמת את עצמך.\n\n"
-            + "לאחר האימות תקבל את הרול שהוגדר."
-        );
-
-    const row =
-        new ActionRowBuilder()
-            .addComponents(
-
-                new ButtonBuilder()
-                    .setCustomId(
-                        "verify_member"
-                    )
-                    .setLabel(
-                        "אימות"
-                    )
-                    .setEmoji(
-                        "✅"
-                    )
-                    .setStyle(
-                        ButtonStyle.Primary
-                    )
-            );
-
-    await channel.send({
-
-        embeds: [
-            embed
-        ],
-
-        components: [
-            row
-        ]
+  const rest = new REST({ version: '10' }).setToken(TOKEN);
+
+  if (GUILD_ID) {
+    await rest.put(Routes.applicationGuildCommands(CLIENT_ID, GUILD_ID), {
+      body: commands,
     });
-}
-
-// ============================================================
-// 🎫 TICKET PANEL
-// ============================================================
-
-async function sendTicketPanel(
-    guild,
-    channel
-) {
-
-    const embed =
-        makeEmbed(
-
-            guild,
-
-            "🎫 מערכת הטיקטים",
-
-            "צריך עזרה? אנחנו כאן בשבילך 💙\n\n"
-            + "בחר את סוג הפנייה:\n\n"
-            + "🆘 **תמיכה**\n"
-            + "🚨 **דיווח**\n"
-            + "👮 **בחינה לצוות**\n"
-            + "❓ **אחר**\n\n"
-            + "לאחר פתיחת הטיקט, איש צוות אחד יוכל לקחת אותו."
-        );
-
-    const menu =
-        new StringSelectMenuBuilder()
-            .setCustomId(
-                "ticket_type"
-            )
-            .setPlaceholder(
-                "🎫 בחר סוג טיקט"
-            )
-            .addOptions(
-
-                new StringSelectMenuOptionBuilder()
-                    .setLabel(
-                        "תמיכה"
-                    )
-                    .setDescription(
-                        "עזרה כללית"
-                    )
-                    .setEmoji(
-                        "🆘"
-                    )
-                    .setValue(
-                        "support"
-                    ),
-
-                new StringSelectMenuOptionBuilder()
-                    .setLabel(
-                        "דיווח"
-                    )
-                    .setDescription(
-                        "דיווח על משתמש או בעיה"
-                    )
-                    .setEmoji(
-                        "🚨"
-                    )
-                    .setValue(
-                        "report"
-                    ),
-
-                new StringSelectMenuOptionBuilder()
-                    .setLabel(
-                        "בחינה לצוות"
-                    )
-                    .setDescription(
-                        "פנייה בנושא צוות"
-                    )
-                    .setEmoji(
-                        "👮"
-                    )
-                    .setValue(
-                        "staff"
-                    ),
-
-                new StringSelectMenuOptionBuilder()
-                    .setLabel(
-                        "אחר"
-                    )
-                    .setDescription(
-                        "נושא אחר"
-                    )
-                    .setEmoji(
-                        "❓"
-                    )
-                    .setValue(
-                        "other"
-                    )
-            );
-
-    const row =
-        new ActionRowBuilder()
-            .addComponents(
-                menu
-            );
-
-    await channel.send({
-
-        embeds: [
-            embed
-        ],
-
-        components: [
-            row
-        ]
+    console.log('Slash commands registered to guild.');
+  } else {
+    await rest.put(Routes.applicationCommands(CLIENT_ID), {
+      body: commands,
     });
+    console.log('Global slash commands registered.');
+  }
 }
 
 // ============================================================
-// 🎛️ TICKET BUTTONS
+// DAILY QUESTION + RIDDLE
 // ============================================================
 
-function createTicketButtons(
-    claimed
-) {
+const DAILY_QUESTIONS = [
+  'אם היית יכול להוסיף מערכת אחת ל-ChillZone, איזו מערכת היית מוסיף?',
+  'מה המשחק שאתם הכי אוהבים לשחק לאחרונה?',
+  'מה הדבר שהכי חשוב לכם בשרת קהילה טוב?',
+  'איזה אירוע הייתם רוצים לראות ב-ChillZone?',
+  'אם הייתם יכולים לבחור כוח-על אחד, מה הייתם בוחרים?',
+  'איזה ערוץ חדש הייתם מוסיפים לשרת?',
+  'מה השיר שאתם הכי אוהבים כרגע?',
+  'מה המשחק הראשון ששיחקתם בו?',
+  'איזה פיצ׳ר בבוט הכי שימושי לדעתכם?',
+  'מה הייתם משנים בשרת כדי להפוך אותו לעוד יותר כיף?'
+];
 
-    return new ActionRowBuilder()
-        .addComponents(
+const DAILY_RIDDLES = [
+  { q: 'מה עולה אבל אף פעם לא יורד?', a: 'הגיל' },
+  { q: 'יש לי שיניים אבל אני לא אוכל. מה אני?', a: 'מסרק' },
+  { q: 'מה יש לו ידיים אבל הוא לא יכול למחוא כפיים?', a: 'שעון' },
+  { q: 'מה נשבר בלי שנוגעים בו?', a: 'הבטחה' },
+  { q: 'מה מלא חורים ועדיין מחזיק מים?', a: 'ספוג' },
+  { q: 'מה הולך מסביב לעולם אבל נשאר בפינה?', a: 'בול' },
+  { q: 'מה תמיד לפניך אבל אי אפשר לראות אותו?', a: 'העתיד' },
+  { q: 'מה יש לו צוואר אבל אין לו ראש?', a: 'בקבוק' },
+  { q: 'מה אפשר לתפוס אבל אי אפשר לזרוק?', a: 'הצטננות' },
+  { q: 'מה נהיה רטוב ככל שהוא מייבש?', a: 'מגבת' }
+];
 
-            new ButtonBuilder()
-                .setCustomId(
-                    "ticket_claim"
-                )
-                .setLabel(
-                    claimed
-                        ? "טיקט נלקח"
-                        : "קח טיקט"
-                )
-                .setEmoji(
-                    "🙋"
-                )
-                .setStyle(
+function israelDateParts() {
+  const parts = new Intl.DateTimeFormat('en-GB', {
+    timeZone: 'Asia/Jerusalem',
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+    hour12: false,
+  }).formatToParts(new Date());
 
-                    claimed
-                        ? ButtonStyle.Secondary
-                        : ButtonStyle.Primary
-
-                )
-                .setDisabled(
-                    claimed
-                ),
-
-            new ButtonBuilder()
-                .setCustomId(
-                    "ticket_add_staff"
-                )
-                .setLabel(
-                    "הוסף צוות"
-                )
-                .setEmoji(
-                    "👥"
-                )
-                .setStyle(
-                    ButtonStyle.Primary
-                ),
-
-            new ButtonBuilder()
-                .setCustomId(
-                    "ticket_close"
-                )
-                .setLabel(
-                    "סגור טיקט"
-                )
-                .setEmoji(
-                    "🔒"
-                )
-                .setStyle(
-                    ButtonStyle.Danger
-                )
-        );
+  const out = {};
+  for (const part of parts) out[part.type] = part.value;
+  return out;
 }
 
-// ============================================================
-// 🎫 CREATE TICKET
-// ============================================================
+function israelToday() {
+  const p = israelDateParts();
+  return p.year + '-' + p.month + '-' + p.day;
+}
 
-async function createTicket(
-    interaction,
-    type
-) {
+function hashString(value) {
+  let hash = 0;
+  for (let i = 0; i < value.length; i++) {
+    hash = ((hash << 5) - hash) + value.charCodeAt(i);
+    hash |= 0;
+  }
+  return hash;
+}
 
-    const guild =
-        interaction.guild;
+async function checkDailyPosts() {
+  const now = israelDateParts();
 
-    const member =
-        interaction.member;
+  if (
+    String(now.hour).padStart(2, '0') !== '07' ||
+    String(now.minute).padStart(2, '0') !== '00'
+  ) {
+    return;
+  }
 
-    const config =
-        await getGuildData(
-            guild.id
-        );
+  const today = israelToday();
 
-    const existing =
-        Object.entries(
-            config.tickets
-        ).find(
-            ([channelId, ticket]) =>
-                ticket.userId ===
-                member.id
-        );
-
-    if (existing) {
-
-        const oldChannel =
-            guild.channels.cache.get(
-                existing[0]
-            );
-
-        if (oldChannel) {
-
-            return interaction.reply({
-
-                content:
-                    `❌ כבר יש לך טיקט פתוח: ${oldChannel}`,
-
-                ephemeral:
-                    true
-            });
-        }
-    }
-
-    if (!config.ticketCategory) {
-
-        return interaction.reply({
-
-            content:
-                "❌ עדיין לא הוגדרה קטגוריית טיקטים.\n"
-                + "השתמש ב־`/set-ticket-category`.",
-
-            ephemeral:
-                true
-        });
-    }
-
-    const category =
-        guild.channels.cache.get(
-            config.ticketCategory
-        );
+  for (const guild of client.guilds.cache.values()) {
+    const config = getConfig(guild.id);
 
     if (
-        !category ||
-        category.type !==
-            ChannelType.GuildCategory
+      config.dailyQuestionChannel &&
+      config.dailyQuestionLastDate !== today
     ) {
+      const channel = guild.channels.cache.get(config.dailyQuestionChannel);
 
-        return interaction.reply({
+      if (channel && channel.isTextBased()) {
+        const index =
+          Math.abs(
+            hashString(guild.id + ':' + today + ':question')
+          ) % DAILY_QUESTIONS.length;
 
-            content:
-                "❌ קטגוריית הטיקטים לא נמצאה.",
+        await channel.send({
+          embeds: [
+            embed(
+              '❓ השאלה היומית',
+              '# שאלה להיום 💙\n\n' +
+                DAILY_QUESTIONS[index] +
+                '\n\n💬 כתבו את התשובה שלכם בתגובות!'
+            ),
+          ],
+        }).catch(function () {});
 
-            ephemeral:
-                true
-        });
+        config.dailyQuestionLastDate = today;
+        saveData();
+
+        await sendLog(
+          guild,
+          '❓ Daily Question',
+          'השאלה היומית נשלחה לחדר ' + channel + '.'
+        );
+      }
     }
 
-    const typeNames = {
+    if (
+      config.dailyRiddleChannel &&
+      config.dailyRiddleLastDate !== today
+    ) {
+      const channel = guild.channels.cache.get(config.dailyRiddleChannel);
 
-        support:
-            "תמיכה",
+      if (channel && channel.isTextBased()) {
+        const index =
+          Math.abs(
+            hashString(guild.id + ':' + today + ':riddle')
+          ) % DAILY_RIDDLES.length;
 
-        report:
-            "דיווח",
+        await channel.send({
+          embeds: [
+            embed(
+              '🧩 החידה היומית',
+              '# חידה להיום 💙\n\n' +
+                '**' +
+                DAILY_RIDDLES[index].q +
+                '**\n\n💡 נראה מי ימצא את התשובה ראשון!'
+            ),
+          ],
+        }).catch(function () {});
 
-        staff:
-            "בחינה לצוות",
+        config.dailyRiddleLastDate = today;
+        saveData();
 
-        other:
-            "אחר"
-    };
-
-    const safeUsername =
-        member.user.username
-            .toLowerCase()
-            .replace(
-                /[^a-z0-9]/g,
-                ""
-            )
-            .slice(
-                0,
-                18
-            ) ||
-        "user";
-
-    const channelName =
-        `ticket-${safeUsername}`;
-
-    const overwrites = [
-
-        {
-            id:
-                guild.roles.everyone.id,
-
-            deny: [
-
-                PermissionsBitField.Flags.ViewChannel
-
-            ]
-        },
-
-        {
-            id:
-                member.id,
-
-            allow: [
-
-                PermissionsBitField.Flags.ViewChannel,
-
-                PermissionsBitField.Flags.SendMessages,
-
-                PermissionsBitField.Flags.ReadMessageHistory
-
-            ]
-        }
-
-    ];
-
-    if (config.staffRole) {
-
-        overwrites.push({
-
-            id:
-                config.staffRole,
-
-            allow: [
-
-                PermissionsBitField.Flags.ViewChannel,
-
-                PermissionsBitField.Flags.SendMessages,
-
-                PermissionsBitField.Flags.ReadMessageHistory
-
-            ]
-        });
+        await sendLog(
+          guild,
+          '🧩 Daily Riddle',
+          'החידה היומית נשלחה לחדר ' + channel + '.'
+        );
+      }
     }
+  }
+}
 
-    const channel =
-        await guild.channels.create({
+// ============================================================
+// REQUEST PANELS
+// ============================================================
 
-            name:
-                channelName,
-
-            type:
-                ChannelType.GuildText,
-
-            parent:
-                category.id,
-
-            permissionOverwrites:
-                overwrites
-        });
-
-    config.tickets[
-        channel.id
-    ] = {
-
-        userId:
-            member.id,
-
-        type:
-            type,
-
-        claimed:
-            false,
-
-        claimedBy:
-            null,
-
-        addedStaff:
-            [],
-
-        aiHistory:
-            [],
-
-        createdAt:
-            Date.now()
+function requestInfo(type) {
+  if (type === 'ban') {
+    return {
+      label: 'הסרת Ban',
+      emoji: '🔓',
+      prefix: 'ban-request',
     };
+  }
 
-    await saveGuildData(
-        guild.id,
-        config
+  if (type === 'adult') {
+    return {
+      label: '17+',
+      emoji: '🔞',
+      prefix: '17-request',
+    };
+  }
+
+  return {
+    label: 'VIP',
+    emoji: '💎',
+    prefix: 'vip-request',
+  };
+}
+
+function requestButtons(type, channelId, decided) {
+  return new ActionRowBuilder().addComponents(
+    new ButtonBuilder()
+      .setCustomId('request_approve:' + type + ':' + channelId)
+      .setLabel('✅ אשר')
+      .setStyle(ButtonStyle.Primary)
+      .setDisabled(Boolean(decided)),
+
+    new ButtonBuilder()
+      .setCustomId('request_reject:' + type + ':' + channelId)
+      .setLabel('❌ דחה')
+      .setStyle(ButtonStyle.Danger)
+      .setDisabled(Boolean(decided)),
+
+    new ButtonBuilder()
+      .setCustomId('request_close:' + type + ':' + channelId)
+      .setLabel('🔒 סגור')
+      .setStyle(ButtonStyle.Secondary)
+  );
+}
+
+async function createRequestPanel(interaction, type) {
+  const info = requestInfo(type);
+
+  await interaction.channel.send({
+    embeds: [
+      embed(
+        info.emoji + ' בקשת ' + info.label,
+        '# רוצה להגיש בקשה? 💙\n\n' +
+          'לחץ על הכפתור למטה כדי לפתוח חדר פרטי עם הצוות.\n\n' +
+          '👮 הצוות יקבל התראה ויטפל בבקשה.\n' +
+          '🤖 אין AI בחדרי הבקשות.'
+      ),
+    ],
+
+    components: [
+      new ActionRowBuilder().addComponents(
+        new ButtonBuilder()
+          .setCustomId('request_open_' + type)
+          .setLabel(info.emoji + ' פתח בקשה')
+          .setStyle(ButtonStyle.Primary)
+      ),
+    ],
+  });
+
+  return interaction.reply({
+    embeds: [
+      successEmbed(
+        'הפאנל נשלח!',
+        'פאנל בקשת ' + info.label + ' פעיל עכשיו.'
+      ),
+    ],
+    ephemeral: true,
+  });
+}
+
+async function openRequest(interaction, type) {
+  const guild = interaction.guild;
+  const config = getConfig(guild.id);
+  const info = requestInfo(type);
+
+  if (!config.requestCategory) {
+    return interaction.reply({
+      content: '❌ צריך להגדיר Request Category עם /config category.',
+      ephemeral: true,
+    });
+  }
+
+  if (!config.staffRole) {
+    return interaction.reply({
+      content: '❌ צריך להגדיר Staff Role עם /config role.',
+      ephemeral: true,
+    });
+  }
+
+  const existing = Object.values(data.requests || {}).find(function (request) {
+    return (
+      request.guildId === guild.id &&
+      request.userId === interaction.user.id &&
+      request.type === type &&
+      request.status === 'open'
+    );
+  });
+
+  if (existing) {
+    return interaction.reply({
+      embeds: [
+        embed(
+          '📨 כבר קיימת בקשה',
+          'יש לך כבר בקשה פתוחה כאן:\n<#' +
+            existing.channelId +
+            '>'
+        ),
+      ],
+      ephemeral: true,
+    });
+  }
+
+  const channel = await guild.channels.create({
+    name: safeChannelName(info.prefix, interaction.user.username),
+    type: ChannelType.GuildText,
+    parent: config.requestCategory,
+
+    permissionOverwrites: [
+      {
+        id: guild.roles.everyone.id,
+        deny: [PermissionFlagsBits.ViewChannel],
+      },
+      {
+        id: interaction.user.id,
+        allow: [
+          PermissionFlagsBits.ViewChannel,
+          PermissionFlagsBits.SendMessages,
+          PermissionFlagsBits.ReadMessageHistory,
+        ],
+      },
+      {
+        id: config.staffRole,
+        allow: [
+          PermissionFlagsBits.ViewChannel,
+          PermissionFlagsBits.SendMessages,
+          PermissionFlagsBits.ReadMessageHistory,
+        ],
+      },
+    ],
+  });
+
+  if (!data.requests) data.requests = {};
+
+  data.requests[channel.id] = {
+    channelId: channel.id,
+    guildId: guild.id,
+    userId: interaction.user.id,
+    type: type,
+    status: 'open',
+    decision: null,
+    decisionBy: null,
+    createdAt: Date.now(),
+  };
+
+  saveData();
+
+  await channel.send({
+    content:
+      '<@' +
+      interaction.user.id +
+      '> <@&' +
+      config.staffRole +
+      '>',
+
+    embeds: [
+      embed(
+        info.emoji + ' בקשת ' + info.label,
+        '# בקשה חדשה 💙\n\n' +
+          '👤 **משתמש:** ' +
+          interaction.user +
+          '\n' +
+          '🆔 **ID:** ' +
+          interaction.user.id +
+          '\n' +
+          '📌 **סוג:** ' +
+          info.label +
+          '\n\n' +
+          '👮 הצוות יכול לאשר, לדחות או לסגור את הבקשה.\n' +
+          '🤖 אין AI בחדר הזה.'
+      ),
+    ],
+
+    components: [requestButtons(type, channel.id, false)],
+  });
+
+  await sendLog(
+    guild,
+    '📨 Request Opened',
+    interaction.user +
+      ' פתח בקשת **' +
+      info.label +
+      '**.\nחדר: ' +
+      channel
+  );
+
+  return interaction.reply({
+    embeds: [
+      successEmbed(
+        'הבקשה נפתחה!',
+        'הבקשה שלך כאן: ' + channel
+      ),
+    ],
+    ephemeral: true,
+  });
+}
+
+// ============================================================
+// READY
+// ============================================================
+
+client.once('ready', async function () {
+  console.log('💙 ChillZone מחובר בתור ' + client.user.tag);
+
+  client.user.setPresence({
+    status: 'online',
+    activities: [{ name: 'ChillZone 💙', type: 3 }],
+  });
+
+  checkDailyPosts().catch(function (error) {
+    console.error('Daily posts error:', error);
+  });
+
+  setInterval(function () {
+    checkDailyPosts().catch(function (error) {
+      console.error('Daily posts error:', error);
+    });
+  }, 30000);
+
+  try {
+    await registerCommands();
+  } catch (error) {
+    console.error('Command registration error:', error);
+  }
+});
+
+// ============================================================
+// WELCOME
+// ============================================================
+
+client.on('guildMemberAdd', async function (member) {
+  const config = getConfig(member.guild.id);
+
+  if (config.autoRole) {
+    const role = member.guild.roles.cache.get(config.autoRole);
+
+    if (role) {
+      await member.roles.add(role).catch(function (error) {
+        console.error('Auto role error:', error.message || error);
+      });
+    }
+  }
+
+  if (config.welcomeChannel) {
+    const channel = member.guild.channels.cache.get(
+      config.welcomeChannel
     );
 
-    const embed =
-        makeEmbed(
+    if (channel && channel.isTextBased()) {
+      const welcome = new EmbedBuilder()
+        .setColor(BLUE)
+        .setTitle('💙 CHILLZONE')
+        .setDescription(
+          '# ' +
+            member.user.username +
+            '\n\n' +
+            '## שמחים לראות אותך איתנו! 💙\n\n' +
+            'אתה חבר מספר **' +
+            member.guild.memberCount +
+            '** בשרת.\n\n' +
+            '✨ תיהנה, תכיר אנשים ותעשה חיים!'
+        )
+        .setThumbnail(
+          member.user.displayAvatarURL({ size: 512 })
+        )
+        .setTimestamp()
+        .setFooter({
+          text: 'ChillZone • Welcome',
+        });
 
-            guild,
+      await channel
+        .send({
+          content: '<@' + member.id + '>',
+          embeds: [welcome],
+        })
+        .catch(function () {});
+    }
+  }
 
-            `🎫 טיקט — ${typeNames[type]}`,
+  await sendLog(
+    member.guild,
+    '📥 Member Joined',
+    member.toString() +
+      ' נכנס לשרת.\n\n' +
+      '**User ID:** ' +
+      member.id
+  );
+});
 
-            `שלום ${member}! 👋\n\n`
-            + `הטיקט שלך נפתח בהצלחה.\n`
-            + `כתוב כאן במה אתה צריך עזרה.\n\n`
-            + `🤖 **ה-AI של ChillZone פעיל כרגע.**\n`
-            + `הוא יענה עד שאיש צוות ייקח את הטיקט.\n\n`
-            + `👥 לאחר Claim ניתן להוסיף אנשי צוות דרך **הוסף צוות**.`
+// ============================================================
+// BOOST
+// ============================================================
+
+client.on('guildMemberUpdate', async function (oldMember, newMember) {
+  if (!oldMember.premiumSince && newMember.premiumSince) {
+    const config = getConfig(newMember.guild.id);
+
+    if (config.welcomeChannel) {
+      const channel = newMember.guild.channels.cache.get(
+        config.welcomeChannel
+      );
+
+      if (channel && channel.isTextBased()) {
+        await channel
+          .send({
+            embeds: [
+              embed(
+                '🚀 תודה על ה-Boost!',
+                '# תודה ענקית ' +
+                  newMember +
+                  '! 💙\n\n' +
+                  'ה-Boost שלך עוזר ל-**ChillZone** לגדול ולהשתפר.\n\n' +
+                  'אתה מלך 👑'
+              ),
+            ],
+          })
+          .catch(function () {});
+      }
+    }
+
+    await sendLog(
+      newMember.guild,
+      '🚀 Server Boost',
+      newMember + ' עשה Boost לשרת!'
+    );
+  }
+});
+
+// ============================================================
+// AI
+// ============================================================
+
+let gemini = null;
+
+if (GEMINI_API_KEY) {
+  gemini = new GoogleGenerativeAI(GEMINI_API_KEY);
+}
+
+async function askGemini(channelId, userMessage, extraContext) {
+  if (!gemini) {
+    throw new Error('Gemini API key missing');
+  }
+
+  const historyRoot = data.guilds.__ai_history__ || {};
+
+  if (!historyRoot[channelId]) {
+    historyRoot[channelId] = [];
+  }
+
+  const channelHistory = historyRoot[channelId];
+
+  channelHistory.push({
+    role: 'user',
+    content: String(userMessage),
+  });
+
+  const recent = channelHistory.slice(-20);
+
+  const conversation = recent
+    .map(function (message) {
+      return (
+        (message.role === 'user'
+          ? 'User'
+          : 'ChillZone AI') +
+        ': ' +
+        message.content
+      );
+    })
+    .join('\n\n');
+
+  const model = gemini.getGenerativeModel({
+    model: GEMINI_MODEL,
+
+    systemInstruction:
+      'אתה ChillZone AI, עוזר הקהילה הרשמי של שרת ChillZone.\n\n' +
+      'אתה צריך להיות חכם, ברור, נחמד, טבעי וקצר כשאפשר.\n' +
+      'ענה בעברית כשמדברים איתך בעברית.\n\n' +
+      'אל תמציא מידע. אם אינך יודע משהו תגיד שאינך יודע.\n' +
+      'אל תטען שאתה צוות. אל תיתן הרשאות ואל תשנה חוקים.\n' +
+      'אם משתמש צריך צוות, המלץ לו לפתוח טיקט.\n\n' +
+      String(extraContext || '') +
+      '\n\n' +
+      'השרת נקרא ChillZone. הצבע המרכזי הוא כחול.',
+  });
+
+  const result = await model.generateContent(conversation);
+  const answer = result.response.text();
+
+  channelHistory.push({
+    role: 'assistant',
+    content: answer,
+  });
+
+  historyRoot[channelId] = channelHistory.slice(-30);
+  data.guilds.__ai_history__ = historyRoot;
+
+  saveData();
+
+  return answer;
+}
+
+async function handleAI(message) {
+  if (!GEMINI_API_KEY) return;
+
+  const ticket = data.tickets[message.channel.id];
+
+  if (ticket) {
+    if (ticket.claimedBy) return;
+
+    try {
+      const answer = await askGemini(
+        message.channel.id,
+        message.content,
+        'זהו טיקט תמיכה של משתמש. המשתמש עדיין מחכה לצוות. עזור לו בצורה הטובה ביותר. אל תגיד שהטיקט נלקח, אל תסגור את הטיקט ואל תמציא פעולות שביצעת.'
+      );
+
+      await message.reply({
+        embeds: [embed('🤖 ChillZone AI', answer)],
+      });
+    } catch (error) {
+      console.error('Ticket AI:', error);
+
+      await message
+        .reply({
+          embeds: [
+            embed(
+              '⚠️ AI',
+              'ה-AI נתקל בבעיה רגעית. נסה שוב בעוד כמה שניות.'
+            ),
+          ],
+        })
+        .catch(function () {});
+    }
+
+    return;
+  }
+
+  const config = getConfig(message.guild.id);
+
+  if (
+    config.aiChannel &&
+    message.channel.id === config.aiChannel
+  ) {
+    try {
+      const answer = await askGemini(
+        message.channel.id,
+        message.content,
+        ''
+      );
+
+      await message.reply({
+        embeds: [embed('🤖 ChillZone AI', answer)],
+      });
+    } catch (error) {
+      console.error('AI Channel:', error);
+
+      await message
+        .reply({
+          embeds: [
+            embed(
+              '⚠️ AI',
+              'ה-AI לא הצליח לענות כרגע. נסה שוב.'
+            ),
+          ],
+        })
+        .catch(function () {});
+    }
+  }
+}
+
+// ============================================================
+// LEVELS
+// ============================================================
+
+const xpCooldown = new Map();
+
+async function handleXP(message) {
+  if (message.author.bot || !message.guild) return;
+
+  const key =
+    message.guild.id +
+    ':' +
+    message.author.id;
+
+  const now = Date.now();
+  const last = xpCooldown.get(key) || 0;
+
+  if (now - last < 60000) return;
+
+  xpCooldown.set(key, now);
+
+  if (!data.levels[key]) {
+    data.levels[key] = {
+      xp: 0,
+      level: 0,
+    };
+  }
+
+  const user = data.levels[key];
+
+  user.xp += Math.floor(Math.random() * 16) + 10;
+
+  const needed =
+    (user.level + 1) * 100;
+
+  if (user.xp >= needed) {
+    user.xp -= needed;
+    user.level += 1;
+
+    const config = getConfig(message.guild.id);
+
+    if (config.levelChannel) {
+      const channel =
+        message.guild.channels.cache.get(
+          config.levelChannel
         );
 
-    await channel.send({
+      if (channel && channel.isTextBased()) {
+        await channel
+          .send({
+            embeds: [
+              embed(
+                '⬆️ LEVEL UP!',
+                '# ' +
+                  message.author +
+                  '\n\n' +
+                  'הגעת ל-**Level ' +
+                  user.level +
+                  '**! 🎉\n\n' +
+                  'המשך לדבר ולהיות פעיל כדי לעלות עוד. 💙'
+              ),
+            ],
+          })
+          .catch(function () {});
+      }
+    }
 
-        content:
-            `${member}`,
+    await sendLog(
+      message.guild,
+      '⬆️ Level Up',
+      message.author +
+        ' עלה ל-Level ' +
+        user.level +
+        '.'
+    );
+  }
 
-        embeds: [
-            embed
-        ],
+  saveData();
+}
 
-        components: [
-            createTicketButtons(false)
-        ]
+// ============================================================
+// SUGGESTIONS
+// ============================================================
+
+async function handleSuggestion(message) {
+  const lower = message.content.toLowerCase();
+
+  if (!lower.startsWith('!הצעה')) return false;
+
+  const suggestion = message.content
+    .slice('!הצעה'.length)
+    .trim();
+
+  if (!suggestion) {
+    await message.reply({
+      embeds: [
+        embed(
+          '💡 הצעה',
+          'שימוש נכון:\n\n' +
+            code('!הצעה להוסיף חדר מוזיקה')
+        ),
+      ],
     });
 
-    await interaction.reply({
+    return true;
+  }
 
-        content:
-            `✅ הטיקט שלך נפתח: ${channel}`,
+  const config = getConfig(message.guild.id);
 
-        ephemeral:
-            true
+  const targetChannel = config.suggestionsChannel
+    ? message.guild.channels.cache.get(
+        config.suggestionsChannel
+      )
+    : message.channel;
+
+  if (!targetChannel || !targetChannel.isTextBased()) {
+    await message
+      .reply({
+        embeds: [
+          embed(
+            '⚠️ הצעה',
+            'חדר ההצעות לא נמצא או אינו חדר טקסט.'
+          ),
+        ],
+      })
+      .catch(function () {});
+
+    return true;
+  }
+
+  const suggestionEmbed = new EmbedBuilder()
+    .setColor(BLUE)
+    .setTitle('💡 הצעה חדשה לשיפור ChillZone')
+    .setDescription(
+      '# ' +
+        suggestion +
+        '\n\n' +
+        '👤 **הוצע על ידי:** ' +
+        message.author +
+        '\n' +
+        '🆔 **User ID:** ' +
+        message.author.id
+    )
+    .setThumbnail(
+      message.author.displayAvatarURL({
+        size: 256,
+      })
+    )
+    .setTimestamp()
+    .setFooter({
+      text: 'ChillZone • Member Suggestion',
+    });
+
+  const sent = await targetChannel.send({
+    embeds: [suggestionEmbed],
+  });
+
+  await sent.react('👍').catch(function () {});
+  await sent.react('👎').catch(function () {});
+
+  await sendLog(
+    message.guild,
+    '💡 הצעה חדשה',
+    '**ממבר:** ' +
+      message.author +
+      '\n\n' +
+      '**הצעה:**\n' +
+      suggestion +
+      '\n\n' +
+      '**חדר:** ' +
+      targetChannel
+  );
+
+  await message.reply({
+    embeds: [
+      successEmbed(
+        'ההצעה נשלחה!',
+        'תודה שעזרת לנו לשפר את ChillZone 💙\n\nהצוות יוכל לראות את ההצעה ולשקול אותה.'
+      ),
+    ],
+  });
+
+  return true;
+}
+
+// ============================================================
+// COUNTING
+// ============================================================
+
+async function handleCounting(message) {
+  const config = getConfig(message.guild.id);
+
+  if (!config.countingChannel) return false;
+  if (message.channel.id !== config.countingChannel) return false;
+  if (!/^\d+$/.test(message.content.trim())) return true;
+
+  if (!data.counting[message.guild.id]) {
+    data.counting[message.guild.id] = {
+      current: 0,
+      lastUser: null,
+    };
+  }
+
+  const state = data.counting[message.guild.id];
+  const number = Number(message.content.trim());
+  const expected = state.current + 1;
+
+  if (
+    number !== expected ||
+    state.lastUser === message.author.id
+  ) {
+    const brokenAt = state.current;
+
+    await message.delete().catch(function () {});
+
+    state.current = 0;
+    state.lastUser = null;
+
+    await message.channel
+      .send({
+        embeds: [
+          embed(
+            '💥 הספירה נשברה!',
+            'הספירה הגיעה ל-**' +
+              brokenAt +
+              '**.\n\nמתחילים מחדש מ-**0**.'
+          ),
+        ],
+      })
+      .catch(function () {});
+
+    saveData();
+    return true;
+  }
+
+  state.current = number;
+  state.lastUser = message.author.id;
+
+  saveData();
+
+  return true;
+}
+
+// ============================================================
+// MESSAGE CREATE
+// ============================================================
+
+client.on('messageCreate', async function (message) {
+  if (message.author.bot || !message.guild) return;
+
+  if (message.content.toLowerCase().startsWith('!h')) {
+    const config = getConfig(message.guild.id);
+
+    if (!config.staffRole) {
+      await message.reply({
+        embeds: [
+          embed(
+            '⚠️ Staff Role לא הוגדר',
+            'אדמין צריך להגדיר אותו עם:\n\n' +
+              code('/config role')
+          ),
+        ],
+      });
+
+      return;
+    }
+
+    const reason =
+      message.content.slice(2).trim() ||
+      'המשתמש ביקש עזרה.';
+
+    await message.channel.send({
+      content: '<@&' + config.staffRole + '>',
+
+      embeds: [
+        embed(
+          '🆘 בקשת עזרה',
+          '# משתמש צריך עזרה\n\n' +
+            '👤 **משתמש:** ' +
+            message.author +
+            '\n\n' +
+            '💬 **בקשה:**\n' +
+            reason +
+            '\n\n' +
+            '👮 **צוות:** טפלו בפנייה בהקדם.'
+        ),
+      ],
     });
 
     await sendLog(
-
-        guild,
-
-        "🎫 טיקט נפתח",
-
-        `**משתמש:** ${member.user.tag}\n`
-        + `**ID:** ${member.id}\n`
-        + `**סוג:** ${typeNames[type]}\n`
-        + `**חדר:** ${channel}`
+      message.guild,
+      '🆘 Help Request',
+      message.author +
+        ' השתמש ב-!h\n\n' +
+        reason
     );
-}
+
+    return;
+  }
+
+  if (await handleSuggestion(message)) return;
+  if (await handleCounting(message)) return;
+
+  if (
+    data.requests &&
+    data.requests[message.channel.id]
+  ) {
+    return;
+  }
+
+  await handleAI(message);
+  await handleXP(message);
+});
 
 // ============================================================
-// 👥 STAFF MEMBERS
+// INTERACTIONS
 // ============================================================
 
-async function getStaffMembers(
-    guild
-) {
+client.on('interactionCreate', async function (interaction) {
+  try {
+    // ========================================================
+    // SLASH COMMANDS
+    // ========================================================
 
-    const config =
-        await getGuildData(
-            guild.id
-        );
+    if (interaction.isChatInputCommand()) {
+      const guild = interaction.guild;
 
-    if (!config.staffRole) {
-        return [];
-    }
-
-    const role =
-        guild.roles.cache.get(
-            config.staffRole
-        );
-
-    if (!role) {
-        return [];
-    }
-
-    return [
-        ...role.members.values()
-    ].filter(
-        member =>
-            !member.user.bot
-    );
-}
-
-// ============================================================
-// 👥 STAFF SELECT
-// ============================================================
-
-async function showStaffSelector(
-    interaction
-) {
-
-    const guild =
-        interaction.guild;
-
-    const members =
-        await getStaffMembers(
-            guild
-        );
-
-    if (!members.length) {
-
+      if (!guild) {
         return interaction.reply({
-
-            content:
-                "❌ לא נמצאו משתמשים עם Staff Role.",
-
-            ephemeral:
-                true
+          content: '❌ הפקודה זמינה רק בשרת.',
+          ephemeral: true,
         });
-    }
+      }
 
-    const visible =
-        members.slice(
-            0,
-            25
-        );
-
-    const options =
-        visible.map(
-            member =>
-
-                new StringSelectMenuOptionBuilder()
-
-                    .setLabel(
-                        member.user.username
-                            .slice(
-                                0,
-                                100
-                            )
-                    )
-
-                    .setDescription(
-                        `ID: ${member.id}`
-                    )
-
-                    .setValue(
-                        member.id
-                    )
-        );
-
-    const menu =
-        new StringSelectMenuBuilder()
-
-            .setCustomId(
-                `ticket_add_staff_select_${interaction.channel.id}`
-            )
-
-            .setPlaceholder(
-                "👥 בחר איש צוות"
-            )
-
-            .addOptions(
-                options
-            );
-
-    const row =
-        new ActionRowBuilder()
-            .addComponents(
-                menu
-            );
-
-    await interaction.reply({
-
-        content:
-            members.length > 25
-                ? "👥 בחר איש צוות. כרגע מוצגים 25 הראשונים."
-                : "👥 בחר איש צוות להוספה לטיקט:",
-
-        components: [
-            row
-        ],
-
-        ephemeral:
-            true
-    });
-}
-
-// ============================================================
-// 🤖 GEMINI AI
-// ============================================================
-
-async function askGemini(
-    message,
-    history = []
-) {
-
-    if (!GEMINI_API_KEY) {
-
-        console.error(
-            "❌ GEMINI_API_KEY חסר."
-        );
-
-        return null;
-    }
-
-    try {
-
-        const contents = [];
-
-        for (
-            const item of
-                history.slice(-20)
-        ) {
-
-            contents.push({
-
-                role:
-                    item.role,
-
-                parts: [
-
-                    {
-                        text:
-                            item.text
-                    }
-
-                ]
-            });
-        }
-
-        contents.push({
-
-            role:
-                "user",
-
-            parts: [
-
-                {
-                    text:
-                        message
-                }
-
-            ]
+      const member =
+        await guild.members.fetch(
+          interaction.user.id
+        ).catch(function () {
+          return null;
         });
 
-        const response =
-            await fetch(
-
-                `https://generativelanguage.googleapis.com/v1beta/models/gemini-3.6-flash:generateContent?key=${encodeURIComponent(GEMINI_API_KEY)}`,
-
-                {
-
-                    method:
-                        "POST",
-
-                    headers: {
-
-                        "Content-Type":
-                            "application/json"
-                    },
-
-                    body:
-                        JSON.stringify({
-
-                            contents,
-
-                            systemInstruction: {
-
-                                parts: [
-
-                                    {
-                                        text:
-                                            "אתה ChillZone AI. ענה בעברית בצורה ברורה, ידידותית ומפורטת. אל תקצר תשובות בכוונה. אם המשתמש מבקש משהו שדורש איש צוות, הסבר לו שאיש צוות יוכל לטפל בזה. אל תטען שאתה איש צוות."
-                                    }
-
-                                ]
-                            },
-
-                            generationConfig: {
-
-                                temperature:
-                                    0.7,
-
-                                maxOutputTokens:
-                                    4096
-                            }
-
-                        })
-                }
-            );
-
-        const result =
-            await response.json();
-
-        if (!response.ok) {
-
-            console.error(
-                "❌ Gemini API:",
-                result
-            );
-
-            return null;
-        }
-
-        const text =
-            result
-                ?.candidates?.[0]
-                ?.content?.parts
-                ?.map(
-                    part =>
-                        part.text || ""
-                )
-                .join("")
-                .trim();
-
-        return text || null;
-
-    } catch (error) {
-
-        console.error(
-            "❌ Gemini error:",
-            error
-        );
-
-        return null;
-    }
-}
-
-// ============================================================
-// 🤖 SPLIT AI MESSAGE
-// ============================================================
-
-function splitMessage(
-    text
-) {
-
-    const chunks = [];
-
-    let remaining =
-        String(text);
-
-    while (
-        remaining.length > 0
-    ) {
-
-        if (
-            remaining.length <= 1900
-        ) {
-
-            chunks.push(
-                remaining
-            );
-
-            break;
-        }
-
-        let cut =
-            remaining.lastIndexOf(
-                "\n",
-                1900
-            );
-
-        if (
-            cut < 500
-        ) {
-
-            cut =
-                remaining.lastIndexOf(
-                    " ",
-                    1900
-                );
-        }
-
-        if (
-            cut <= 0
-        ) {
-            cut = 1900;
-        }
-
-        chunks.push(
-            remaining.slice(
-                0,
-                cut
-            )
-        );
-
-        remaining =
-            remaining
-                .slice(cut)
-                .trimStart();
-    }
-
-    return chunks;
-}
-
-// ============================================================
-// 💬 MESSAGE CREATE
-// ============================================================
-
-client.on(
-    "messageCreate",
-    async message => {
-
-        if (
-            message.author.bot ||
-            !message.guild
-        ) {
-            return;
-        }
-
-        const guild =
-            message.guild;
-
-        const config =
-            await getGuildData(
-                guild.id
-            );
-
-        // ====================================================
-        // 🧹 !cl 1-100
-        // ====================================================
-
-        const clMatch =
-            message.content
-                .trim()
-                .match(
-                    /^!cl\s+(\d+)$/i
-                );
-
-        if (clMatch) {
-
-            if (
-                !(await isStaffMember(
-                    message.member
-                ))
-            ) {
-
-                await message.reply(
-                    "❌ רק צוות יכול להשתמש בפקודה הזאת."
-                );
-
-                return;
-            }
-
-            const amount =
-                parseInt(
-                    clMatch[1]
-                );
-
-            if (
-                amount < 1 ||
-                amount > 100
-            ) {
-
-                await message.reply(
-                    "❌ אפשר למחוק רק מספר בין 1 ל־100."
-                );
-
-                return;
-            }
-
-            try {
-
-                const deleted =
-                    await message.channel.bulkDelete(
-                        amount,
-                        true
-                    );
-
-                const confirmation =
-                    await message.channel.send(
-                        `🧹 נמחקו **${deleted.size}** הודעות בהצלחה.`
-                    );
-
-                setTimeout(
-                    () => {
-
-                        confirmation
-                            .delete()
-                            .catch(
-                                () => {}
-                            );
-
-                    },
-                    3000
-                );
-
-                await sendLog(
-
-                    guild,
-
-                    "🧹 ניקוי הודעות",
-
-                    `**צוות:** ${message.author.tag}\n`
-                    + `**חדר:** ${message.channel}\n`
-                    + `**כמות שבוקשה:** ${amount}\n`
-                    + `**כמות שנמחקה:** ${deleted.size}`
-                );
-
-            } catch (error) {
-
-                console.error(
-                    "Clear error:",
-                    error
-                );
-
-                await message.reply(
-                    "❌ לא הצלחתי למחוק את ההודעות. ודא שלבוט יש Manage Messages."
-                );
-            }
-
-            return;
-        }
-
-        // ====================================================
-        // 💡 !הצעה
-        // ====================================================
-
-        if (
-            message.content
-                .trim()
-                .startsWith(
-                    "!הצעה"
-                )
-        ) {
-
-            const suggestion =
-                message.content
-                    .trim()
-                    .slice(
-                        "!הצעה".length
-                    )
-                    .trim();
-
-            if (!suggestion) {
-
-                await message.reply(
-                    "❌ שימוש נכון: `!הצעה ההצעה שלך`"
-                );
-
-                return;
-            }
-
-            if (
-                !config.suggestionChannel
-            ) {
-
-                await message.reply(
-                    "❌ חדר ההצעות עדיין לא הוגדר."
-                );
-
-                return;
-            }
-
-            if (
-                message.channel.id !==
-                config.suggestionChannel
-            ) {
-
-                await message.reply(
-                    `❌ שלח את ההצעה בחדר <#${config.suggestionChannel}>.`
-                );
-
-                return;
-            }
-
-            if (
-                !config.suggestionStaffChannel
-            ) {
-
-                await message.reply(
-                    "❌ חדר צוות ההצעות עדיין לא הוגדר."
-                );
-
-                return;
-            }
-
-            const staffChannel =
-                guild.channels.cache.get(
-                    config.suggestionStaffChannel
-                );
-
-            if (!staffChannel) {
-
-                await message.reply(
-                    "❌ חדר צוות ההצעות לא נמצא."
-                );
-
-                return;
-            }
-
-            const suggestionId =
-                `${Date.now()}-${message.author.id}`;
-
-            config.suggestions[
-                suggestionId
-            ] = {
-
-                userId:
-                    message.author.id,
-
-                content:
-                    suggestion,
-
-                createdAt:
-                    Date.now(),
-
-                decided:
-                    false,
-
-                accepted:
-                    null,
-
-                decidedBy:
-                    null
-            };
-
-            await saveGuildData(
-                guild.id,
-                config
-            );
-
-            const embed =
-                makeEmbed(
-
-                    guild,
-
-                    "💡 הצעה חדשה",
-
-                    `**מאת:** ${message.author}\n\n`
-                    + `**ההצעה:**\n${cleanMentions(suggestion)}`
-                );
-
-            embed.addFields({
-
-                name:
-                    "🆔 מזהה",
-
-                value:
-                    `\`${suggestionId}\``
-            });
-
-            const row =
-                new ActionRowBuilder()
-                    .addComponents(
-
-                        new ButtonBuilder()
-                            .setCustomId(
-                                `suggestion_accept_${suggestionId}`
-                            )
-                            .setLabel(
-                                "אישור"
-                            )
-                            .setEmoji(
-                                "✅"
-                            )
-                            .setStyle(
-                                ButtonStyle.Primary
-                            ),
-
-                        new ButtonBuilder()
-                            .setCustomId(
-                                `suggestion_reject_${suggestionId}`
-                            )
-                            .setLabel(
-                                "דחייה"
-                            )
-                            .setEmoji(
-                                "❌"
-                            )
-                            .setStyle(
-                                ButtonStyle.Danger
-                            )
-                    );
-
-            const roleMention =
-                config.suggestionRole
-                    ? `<@&${config.suggestionRole}>`
-                    : "";
-
-            await staffChannel.send({
-
-                content:
-                    roleMention,
-
-                embeds: [
-                    embed
-                ],
-
-                components: [
-                    row
-                ]
-            });
-
-            await message.reply(
-                "✅ ההצעה שלך נשלחה לצוות לבדיקה."
-            );
-
-            await sendLog(
-
-                guild,
-
-                "💡 הצעה נשלחה",
-
-                `**משתמש:** ${message.author.tag}\n`
-                + `**הצעה:** ${cleanMentions(suggestion)}`
-            );
-
-            return;
-        }
-
-        // ====================================================
-        // 🚫 REQUEST CHANNELS
-        // אין AI בבקשות
-        // ====================================================
-
-        if (
-            config.requests &&
-            config.requests[
-                message.channel.id
-            ]
-        ) {
-
-            return;
-        }
-
-        // ====================================================
-        // 🤖 AI ROOM
-        // ====================================================
-
-        if (
-            config.aiChannel &&
-            message.channel.id ===
-                config.aiChannel &&
-            config.aiEnabled
-        ) {
-
-            const answer =
-                await askGemini(
-                    message.content,
-                    []
-                );
-
-            if (!answer) {
-
-                await message.reply(
-                    "❌ ה-AI לא הצליח לענות כרגע."
-                );
-
-                return;
-            }
-
-            const chunks =
-                splitMessage(
-                    answer
-                );
-
-            for (
-                const chunk of chunks
-            ) {
-
-                await message.channel.send(
-                    chunk
-                );
-            }
-
-            return;
-        }
-
-        // ====================================================
-        // 🎫 TICKET AI
-        // ====================================================
-
-        const ticket =
-            config.tickets[
-                message.channel.id
-            ];
-
-        if (!ticket) {
-            return;
-        }
-
-        if (
-            ticket.claimed
-        ) {
-            return;
-        }
-
-        if (
-            !config.aiEnabled
-        ) {
-            return;
-        }
-
-        if (
-            !ticket.aiHistory
-        ) {
-
-            ticket.aiHistory =
-                [];
-        }
-
-        const answer =
-            await askGemini(
-
-                message.content,
-
-                ticket.aiHistory
-            );
-
-        if (!answer) {
-            return;
-        }
-
-        ticket.aiHistory.push({
-
-            role:
-                "user",
-
-            text:
-                message.content
+      const staffCommands = [
+        'setup',
+        'config',
+        'chatmute',
+        'voicemute',
+        'ban',
+        'ticket-panel',
+        'private-panel',
+        'roles-panel',
+        'ban-request-panel',
+        'adult-request-panel',
+        'vip-request-panel',
+        'drop',
+        'counting',
+      ];
+
+      if (
+        staffCommands.includes(interaction.commandName) &&
+        !isStaff(member)
+      ) {
+        return interaction.reply({
+          embeds: [
+            embed(
+              '🔒 אין הרשאה',
+              'הפקודה הזו זמינה לצוות בלבד.'
+            ),
+          ],
+          ephemeral: true,
         });
+      }
 
-        ticket.aiHistory.push({
+      // ======================================================
+      // SETUP
+      // ======================================================
 
-            role:
-                "model",
-
-            text:
-                answer
+      if (interaction.commandName === 'setup') {
+        return interaction.reply({
+          embeds: [
+            embed(
+              '⚙️ ChillZone Setup',
+              '# מערכת ההגדרות\n\n' +
+                '🎭 **רולים**\n' +
+                code('/config role') +
+                '\n\n' +
+                '📁 **חדרים**\n' +
+                code('/config channel') +
+                '\n\n' +
+                '📂 **קטגוריות**\n' +
+                code('/config category') +
+                '\n\n' +
+                '🎫 **Tickets**\n' +
+                code('/ticket-panel') +
+                '\n\n' +
+                '🏠 **Private Rooms**\n' +
+                code('/private-panel') +
+                '\n\n' +
+                '🎭 **Roles**\n' +
+                code('/roles-panel') +
+                '\n\n' +
+                '📨 **בקשות Ban / 17+ / VIP**\n' +
+                code('/ban-request-panel') +
+                '  ' +
+                code('/adult-request-panel') +
+                '  ' +
+                code('/vip-request-panel') +
+                '\n\n' +
+                '🎁 **Drops**\n' +
+                code('/drop') +
+                '\n\n' +
+                '💡 **Suggestions**\n' +
+                code('!הצעה הטקסט') +
+                '\n\n' +
+                '🆘 **Help**\n' +
+                code('!h')
+            ),
+          ],
+          ephemeral: true,
         });
+      }
 
-        await saveGuildData(
-            guild.id,
-            config
-        );
+      // ======================================================
+      // CONFIG
+      // ======================================================
 
-        const chunks =
-            splitMessage(
-                answer
-            );
+      if (interaction.commandName === 'config') {
+        const sub = interaction.options.getSubcommand();
+        const config = getConfig(guild.id);
 
-        for (
-            const chunk of chunks
-        ) {
+        if (sub === 'role') {
+          const type =
+            interaction.options.getString('type');
 
-            await message.channel.send(
-                chunk
-            );
-        }
-    }
-);
+          const role =
+            interaction.options.getRole('role');
 
-// ============================================================
-// 🔘 INTERACTION CREATE
-// ============================================================
+          config[type] = role.id;
+          saveData();
 
-client.on(
-    "interactionCreate",
-    async interaction => {
-
-        try {
-
-            if (
-                interaction.isChatInputCommand()
-            ) {
-
-                await handleCommand(
-                    interaction
-                );
-
-                return;
-            }
-
-            if (
-                interaction.isButton()
-            ) {
-
-                await handleButton(
-                    interaction
-                );
-
-                return;
-            }
-
-            if (
-                interaction.isStringSelectMenu()
-            ) {
-
-                await handleSelect(
-                    interaction
-                );
-
-                return;
-            }
-
-            if (
-                interaction.isModalSubmit()
-            ) {
-
-                await handleModal(
-                    interaction
-                );
-
-                return;
-            }
-
-        } catch (error) {
-
-            console.error(
-                "❌ Interaction error:",
-                error
-            );
-
-            try {
-
-                if (
-                    interaction.replied ||
-                    interaction.deferred
-                ) {
-
-                    await interaction.followUp({
-
-                        content:
-                            "❌ אירעה שגיאה.",
-
-                        ephemeral:
-                            true
-                    });
-
-                } else {
-
-                    await interaction.reply({
-
-                        content:
-                            "❌ אירעה שגיאה.",
-
-                        ephemeral:
-                            true
-                    });
-                }
-
-            } catch {}
-        }
-    }
-);
-
-// ============================================================
-// 📋 SELECT MENUS
-// ============================================================
-
-async function handleSelect(
-    interaction
-) {
-
-    // ========================================================
-    // 🎫 TICKET TYPE
-    // ========================================================
-
-    if (
-        interaction.customId ===
-        "ticket_type"
-    ) {
-
-        await createTicket(
-
-            interaction,
-
-            interaction.values[0]
-        );
-
-        return;
-    }
-
-    // ========================================================
-    // 👥 ADD STAFF
-    // ========================================================
-
-    if (
-        interaction.customId
-            .startsWith(
-                "ticket_add_staff_select_"
-            )
-    ) {
-
-        const channelId =
-            interaction.customId.replace(
-                "ticket_add_staff_select_",
-                ""
-            );
-
-        const guild =
-            interaction.guild;
-
-        const config =
-            await getGuildData(
-                guild.id
-            );
-
-        const ticket =
-            config.tickets[
-                channelId
-            ];
-
-        if (!ticket) {
-
-            return interaction.reply({
-
-                content:
-                    "❌ הטיקט לא נמצא.",
-
-                ephemeral:
-                    true
-            });
+          return interaction.reply({
+            embeds: [
+              successEmbed(
+                'הרול הוגדר!',
+                '**' +
+                  type +
+                  '** → ' +
+                  role
+              ),
+            ],
+            ephemeral: true,
+          });
         }
 
-        if (
-            !(await isStaffMember(
-                interaction.member
-            ))
-        ) {
+        if (sub === 'channel') {
+          const type =
+            interaction.options.getString('type');
 
-            return interaction.reply({
+          const channel =
+            interaction.options.getChannel('channel');
 
-                content:
-                    "❌ רק צוות יכול להוסיף צוות.",
+          config[type] = channel.id;
+          saveData();
 
-                ephemeral:
-                    true
-            });
+          return interaction.reply({
+            embeds: [
+              successEmbed(
+                'החדר הוגדר!',
+                '**' +
+                  type +
+                  '** → ' +
+                  channel
+              ),
+            ],
+            ephemeral: true,
+          });
         }
 
-        const userId =
-            interaction.values[0];
+        if (sub === 'category') {
+          const type =
+            interaction.options.getString('type');
 
-        const member =
-            await guild.members.fetch(
-                userId
-            ).catch(
-                () => null
-            );
+          const channel =
+            interaction.options.getChannel('channel');
 
-        if (!member) {
+          config[type] = channel.id;
+          saveData();
 
-            return interaction.reply({
-
-                content:
-                    "❌ המשתמש לא נמצא.",
-
-                ephemeral:
-                    true
-            });
+          return interaction.reply({
+            embeds: [
+              successEmbed(
+                'הקטגוריה הוגדרה!',
+                '**' +
+                  type +
+                  '** → ' +
+                  channel
+              ),
+            ],
+            ephemeral: true,
+          });
         }
-
-        if (
-            !ticket.addedStaff
-        ) {
-
-            ticket.addedStaff =
-                [];
-        }
-
-        if (
-            !ticket.addedStaff.includes(
-                member.id
-            )
-        ) {
-
-            ticket.addedStaff.push(
-                member.id
-            );
-        }
-
-        const channel =
-            guild.channels.cache.get(
-                channelId
-            );
-
-        if (!channel) {
-
-            return interaction.reply({
-
-                content:
-                    "❌ חדר הטיקט לא נמצא.",
-
-                ephemeral:
-                    true
-            });
-        }
-
-        await channel.permissionOverwrites.edit(
-
-            member.id,
-
-            {
-
-                ViewChannel:
-                    true,
-
-                SendMessages:
-                    true,
-
-                ReadMessageHistory:
-                    true
-            }
-        );
-
-        await saveGuildData(
-            guild.id,
-            config
-        );
-
-        await interaction.reply({
-
-            content:
-                `✅ ${member} נוסף לטיקט.`,
-
-            ephemeral:
-                true
-        });
-
-        await channel.send(
-            `👥 ${interaction.user} הוסיף את ${member} לטיקט.`
-        );
-
-        await sendLog(
-
-            guild,
-
-            "👥 צוות נוסף לטיקט",
-
-            `**הוסיף:** ${interaction.user.tag}\n`
-            + `**נוסף:** ${member.user.tag}\n`
-            + `**טיקט:** ${channel}`
-        );
-
-        return;
-    }
-}
-
-// ============================================================
-// 🔘 BUTTONS
-// ============================================================
-
-async function handleButton(
-    interaction
-) {
-
-    const guild =
-        interaction.guild;
-
-    if (!guild) {
-        return;
-    }
-
-    const config =
-        await getGuildData(
-            guild.id
-        );
-
-    const id =
-        interaction.customId;
-
-    // ========================================================
-    // 🔐 VERIFY
-    // ========================================================
-
-    if (
-        id ===
-        "verify_member"
-    ) {
-
-        if (!config.verifyRole) {
-
-            return interaction.reply({
-
-                content:
-                    "❌ רול האימות לא הוגדר.",
-
-                ephemeral:
-                    true
-            });
-        }
-
-        const role =
-            guild.roles.cache.get(
-                config.verifyRole
-            );
-
-        if (!role) {
-
-            return interaction.reply({
-
-                content:
-                    "❌ רול האימות לא נמצא.",
-
-                ephemeral:
-                    true
-            });
-        }
-
-        if (
-            interaction.member.roles.cache.has(
-                role.id
-            )
-        ) {
-
-            return interaction.reply({
-
-                content:
-                    "ℹ️ אתה כבר מאומת.",
-
-                ephemeral:
-                    true
-            });
-        }
-
-        try {
-
-            await interaction.member.roles.add(
-                role
-            );
-
-            await interaction.reply({
-
-                content:
-                    "✅ אומתת בהצלחה! ברוך הבא ל־ChillZone 💙",
-
-                ephemeral:
-                    true
-            });
-
-            await sendLog(
-
-                guild,
-
-                "🔐 משתמש אומת",
-
-                `**משתמש:** ${interaction.user.tag}\n`
-                + `**ID:** ${interaction.user.id}\n`
-                + `**רול:** ${role.name}`
-            );
-
-        } catch {
-
-            await interaction.reply({
-
-                content:
-                    "❌ לא הצלחתי לתת לך את רול האימות. ודא שרול הבוט נמצא מעל רול האימות.",
-
-                ephemeral:
-                    true
-            });
-        }
-
-        return;
-    }
-
-    // ========================================================
-    // 🎫 CLAIM
-    // ========================================================
-
-    if (
-        id ===
-        "ticket_claim"
-    ) {
-
-        if (
-            !(await isStaffMember(
-                interaction.member
-            ))
-        ) {
-
-            return interaction.reply({
-
-                content:
-                    "❌ רק צוות יכול לקחת טיקט.",
-
-                ephemeral:
-                    true
-            });
-        }
-
-        const ticket =
-            config.tickets[
-                interaction.channel.id
-            ];
-
-        if (!ticket) {
-
-            return interaction.reply({
-
-                content:
-                    "❌ הטיקט לא נמצא.",
-
-                ephemeral:
-                    true
-            });
-        }
-
-        if (
-            ticket.claimed
-        ) {
-
-            return interaction.reply({
-
-                content:
-                    `❌ הטיקט כבר נלקח על ידי <@${ticket.claimedBy}>.`,
-
-                ephemeral:
-                    true
-            });
-        }
-
-        ticket.claimed =
-            true;
-
-        ticket.claimedBy =
-            interaction.user.id;
-
-        await saveGuildData(
-            guild.id,
-            config
-        );
-
-        if (
-            config.staffRole
-        ) {
-
-            await interaction.channel
-                .permissionOverwrites.edit(
-
-                    config.staffRole,
-
-                    {
-
-                        ViewChannel:
-                            false,
-
-                        SendMessages:
-                            false,
-
-                        ReadMessageHistory:
-                            false
-                    }
-                );
-        }
-
-        await interaction.channel
-            .permissionOverwrites.edit(
-
-                interaction.user.id,
-
-                {
-
-                    ViewChannel:
-                        true,
-
-                    SendMessages:
-                        true,
-
-                    ReadMessageHistory:
-                        true
-                }
-            );
-
-        for (
-            const staffId of
-                ticket.addedStaff || []
-        ) {
-
-            await interaction.channel
-                .permissionOverwrites.edit(
-
-                    staffId,
-
-                    {
-
-                        ViewChannel:
-                            true,
-
-                        SendMessages:
-                            true,
-
-                        ReadMessageHistory:
-                            true
-                    }
-
-                )
-                .catch(
-                    () => {}
-                );
-        }
-
-        await interaction.message.edit({
-
-            components: [
-
-                createTicketButtons(
-                    true
-                )
-
-            ]
-        });
-
-        await interaction.reply({
-
-            content:
-                "🙋 לקחת את הטיקט בהצלחה.",
-
-            ephemeral:
-                true
-        });
-
-        await interaction.channel.send(
-
-            `🙋 **${interaction.user} לקח את הטיקט.**\n`
-            + `🤖 ה-AI הפסיק לענות בטיקט הזה.\n`
-            + `👥 כדי להוסיף איש צוות נוסף, השתמש בכפתור **הוסף צוות**.`
-
-        );
-
-        await sendLog(
-
-            guild,
-
-            "🙋 טיקט נלקח",
-
-            `**צוות:** ${interaction.user.tag}\n`
-            + `**טיקט:** ${interaction.channel.name}`
-        );
-
-        return;
-    }
-
-    // ========================================================
-    // 👥 ADD STAFF
-    // ========================================================
-
-    if (
-        id ===
-        "ticket_add_staff"
-    ) {
-
-        if (
-            !(await isStaffMember(
-                interaction.member
-            ))
-        ) {
-
-            return interaction.reply({
-
-                content:
-                    "❌ רק צוות יכול להוסיף צוות.",
-
-                ephemeral:
-                    true
-            });
-        }
-
-        const ticket =
-            config.tickets[
-                interaction.channel.id
-            ];
-
-        if (!ticket) {
-
-            return interaction.reply({
-
-                content:
-                    "❌ הטיקט לא נמצא.",
-
-                ephemeral:
-                    true
-            });
-        }
-
-        await showStaffSelector(
-            interaction
-        );
-
-        return;
-    }
-
-    // ========================================================
-    // 🔒 CLOSE TICKET
-    // ========================================================
-
-    if (
-        id ===
-        "ticket_close"
-    ) {
-
-        const ticket =
-            config.tickets[
-                interaction.channel.id
-            ];
-
-        if (!ticket) {
-
-            return interaction.reply({
-
-                content:
-                    "❌ הטיקט לא נמצא.",
-
-                ephemeral:
-                    true
-            });
-        }
-
-        const allowed =
-            ticket.userId ===
-                interaction.user.id ||
-            await isStaffMember(
-                interaction.member
-            );
-
-        if (!allowed) {
-
-            return interaction.reply({
-
-                content:
-                    "❌ אין לך הרשאה לסגור את הטיקט.",
-
-                ephemeral:
-                    true
-            });
-        }
-
-        await interaction.reply(
-            "🔒 הטיקט ייסגר בעוד 5 שניות..."
-        );
-
-        await sendLog(
-
-            guild,
-
-            "🔒 טיקט נסגר",
-
-            `**על ידי:** ${interaction.user.tag}\n`
-            + `**טיקט:** ${interaction.channel.name}`
-        );
-
-        setTimeout(
-
-            async () => {
-
-                const latest =
-                    await getGuildData(
-                        guild.id
-                    );
-
-                delete latest.tickets[
-                    interaction.channel.id
-                ];
-
-                await saveGuildData(
-                    guild.id,
-                    latest
-                );
-
-                await interaction.channel
-                    .delete()
-                    .catch(
-                        () => {}
-                    );
-
-            },
-
-            5000
-        );
-
-        return;
-    }
-
-    // ========================================================
-    // 🛡️ STAFF MODERATION
-    // ========================================================
-
-    if (
-        [
-            "staff_timeout",
-            "staff_ban",
-            "staff_kick",
-            "staff_mute"
-        ].includes(id)
-    ) {
-
-        if (
-            !(await isStaffMember(
-                interaction.member
-            ))
-        ) {
-
-            return interaction.reply({
-
-                content:
-                    "❌ רק צוות יכול להשתמש בפאנל.",
-
-                ephemeral:
-                    true
-            });
-        }
-
-        let modalId;
-        let title;
-
-        if (
-            id ===
-            "staff_timeout"
-        ) {
-
-            modalId =
-                "modal_timeout";
-
-            title =
-                "⏱️ Timeout";
-        }
-
-        if (
-            id ===
-            "staff_ban"
-        ) {
-
-            modalId =
-                "modal_ban";
-
-            title =
-                "🔨 Ban";
-        }
-
-        if (
-            id ===
-            "staff_kick"
-        ) {
-
-            modalId =
-                "modal_kick";
-
-            title =
-                "👢 Kick";
-        }
-
-        if (
-            id ===
-            "staff_mute"
-        ) {
-
-            modalId =
-                "modal_mute";
-
-            title =
-                "🔇 Mute";
-        }
-
-        const modal =
-            new ModalBuilder()
-                .setCustomId(
-                    modalId
-                )
-                .setTitle(
-                    title
-                );
-
-        const userInput =
-            new TextInputBuilder()
-                .setCustomId(
-                    "user_id"
-                )
-                .setLabel(
-                    "Discord User ID"
-                )
-                .setPlaceholder(
-                    "לדוגמה: 123456789012345678"
-                )
-                .setStyle(
-                    TextInputStyle.Short
-                )
-                .setRequired(
-                    true
-                );
-
-        modal.addComponents(
-
-            new ActionRowBuilder()
-                .addComponents(
-                    userInput
-                )
-        );
-
-        if (
-            id ===
-            "staff_timeout"
-        ) {
-
-            const timeInput =
-                new TextInputBuilder()
-                    .setCustomId(
-                        "minutes"
-                    )
-                    .setLabel(
-                        "כמה דקות?"
-                    )
-                    .setPlaceholder(
-                        "לדוגמה: 10"
-                    )
-                    .setStyle(
-                        TextInputStyle.Short
-                    )
-                    .setRequired(
-                        true
-                    );
-
-            modal.addComponents(
-
-                new ActionRowBuilder()
-                    .addComponents(
-                        timeInput
-                    )
-            );
-        }
-
-        await interaction.showModal(
-            modal
-        );
-
-        return;
-    }
-
-    // ========================================================
-    // 💡 SUGGESTION DECISION
-    // ========================================================
-
-    if (
-        id.startsWith(
-            "suggestion_accept_"
-        ) ||
-        id.startsWith(
-            "suggestion_reject_"
+      }
+
+      // ======================================================
+      // PUNISHMENT HELPER
+      // ======================================================
+
+      if (
+        ['chatmute', 'voicemute', 'ban'].includes(
+          interaction.commandName
         )
-    ) {
+      ) {
+        const config = getConfig(guild.id);
 
-        if (
-            !(await isStaffMember(
-                interaction.member
-            ))
-        ) {
+        const type = interaction.commandName;
 
-            return interaction.reply({
+        const roleKey =
+          type === 'chatmute'
+            ? 'chatMuteRole'
+            : type === 'voicemute'
+              ? 'voiceMuteRole'
+              : 'banRole';
 
-                content:
-                    "❌ רק צוות יכול להחליט על הצעה.",
+        const label =
+          type === 'chatmute'
+            ? 'Chat Mute'
+            : type === 'voicemute'
+              ? 'Voice Mute'
+              : 'Ban Role';
 
-                ephemeral:
-                    true
-            });
+        if (!config[roleKey]) {
+          return interaction.reply({
+            content:
+              '❌ ' +
+              label +
+              ' Role לא הוגדר.',
+            ephemeral: true,
+          });
         }
-
-        const accepted =
-            id.startsWith(
-                "suggestion_accept_"
-            );
-
-        const suggestionId =
-            id
-                .replace(
-                    "suggestion_accept_",
-                    ""
-                )
-                .replace(
-                    "suggestion_reject_",
-                    ""
-                );
-
-        const suggestion =
-            config.suggestions[
-                suggestionId
-            ];
-
-        if (!suggestion) {
-
-            return interaction.reply({
-
-                content:
-                    "❌ ההצעה לא נמצאה.",
-
-                ephemeral:
-                    true
-            });
-        }
-
-        if (
-            suggestion.decided
-        ) {
-
-            return interaction.reply({
-
-                content:
-                    "❌ ההצעה כבר קיבלה החלטה.",
-
-                ephemeral:
-                    true
-            });
-        }
-
-        suggestion.decided =
-            true;
-
-        suggestion.accepted =
-            accepted;
-
-        suggestion.decidedBy =
-            interaction.user.id;
-
-        await saveGuildData(
-            guild.id,
-            config
-        );
 
         const user =
-            await client.users.fetch(
-                suggestion.userId
-            ).catch(
-                () => null
-            );
+          interaction.options.getUser('user');
 
-        if (user) {
-
-            const dmEmbed =
-                makeEmbed(
-
-                    guild,
-
-                    accepted
-                        ? "✅ ההצעה שלך אושרה!"
-                        : "❌ ההצעה שלך נדחתה",
-
-                    accepted
-
-                        ? "צוות ChillZone בדק את ההצעה שלך ואישר אותה 💙"
-
-                        : "צוות ChillZone בדק את ההצעה שלך והחליט שלא לאשר אותה הפעם."
-                );
-
-            dmEmbed.addFields({
-
-                name:
-                    "💡 ההצעה שלך",
-
-                value:
-                    clip(
-
-                        cleanMentions(
-                            suggestion.content
-                        ),
-
-                        1000
-                    )
+        const target =
+          await guild.members.fetch(user.id)
+            .catch(function () {
+              return null;
             });
 
-            await user.send({
-
-                embeds: [
-                    dmEmbed
-                ]
-
-            }).catch(
-                () => {}
-            );
+        if (!target) {
+          return interaction.reply({
+            content:
+              '❌ המשתמש לא נמצא בשרת.',
+            ephemeral: true,
+          });
         }
 
-        const resultEmbed =
-            makeEmbed(
-
-                guild,
-
-                accepted
-                    ? "✅ הצעה אושרה"
-                    : "❌ הצעה נדחתה",
-
-                `**מאת:** <@${suggestion.userId}>\n\n`
-                + `**הצעה:**\n${cleanMentions(suggestion.content)}\n\n`
-                + `**החלטה:** ${accepted ? "אושרה ✅" : "נדחתה ❌"}\n`
-                + `**על ידי:** ${interaction.user}`
-            );
-
-        await interaction.message.edit({
-
-            embeds: [
-                resultEmbed
-            ],
-
-            components: []
-        });
-
-        await interaction.reply({
-
+        if (target.id === interaction.user.id) {
+          return interaction.reply({
             content:
-                accepted
-                    ? "✅ ההצעה אושרה והמשתמש קיבל DM."
-                    : "❌ ההצעה נדחתה והמשתמש קיבל DM.",
-
-            ephemeral:
-                true
-        });
-
-        await sendLog(
-
-            guild,
-
-            accepted
-                ? "💡 הצעה אושרה"
-                : "💡 הצעה נדחתה",
-
-            `**משתמש:** <@${suggestion.userId}>\n`
-            + `**צוות:** ${interaction.user.tag}\n`
-            + `**הצעה:** ${cleanMentions(suggestion.content)}`
-        );
-
-        return;
-    }
-
-    // ========================================================
-    // 🎫 REQUEST OPEN
-    // ========================================================
-
-    if (
-        id ===
-            "request_open_ban" ||
-        id ===
-            "request_open_adult" ||
-        id ===
-            "request_open_vip"
-    ) {
-
-        const type =
-            id.replace(
-                "request_open_",
-                ""
-            );
-
-        await createRequestTicket(
-            interaction,
-            type
-        );
-
-        return;
-    }
-
-    // ========================================================
-    // 🎫 REQUEST DECISIONS
-    // ========================================================
-
-    if (
-        id.startsWith(
-            "request_approve_"
-        ) ||
-        id.startsWith(
-            "request_reject_"
-        ) ||
-        id.startsWith(
-            "request_close_"
-        )
-    ) {
-
-        if (
-            !(await isStaffMember(
-                interaction.member
-            ))
-        ) {
-
-            return interaction.reply({
-
-                content:
-                    "❌ רק צוות יכול לטפל בבקשות.",
-
-                ephemeral:
-                    true
-            });
+              '❌ אי אפשר להעניש את עצמך.',
+            ephemeral: true,
+          });
         }
 
-        const parts =
-            id.split("_");
+        const time =
+          interaction.options.getString('time');
 
-        const action =
-            parts[1];
+        const reason =
+          interaction.options.getString('reason') ||
+          'לא צוינה סיבה.';
 
-        const type =
-            parts[2];
+        const duration =
+          parseDuration(time);
 
-        const channelId =
-            parts.slice(
-                3
-            ).join("_");
-
-        const request =
-            config.requests[
-                channelId
-            ];
-
-        if (!request) {
-
-            return interaction.reply({
-
-                content:
-                    "❌ הבקשה לא נמצאה.",
-
-                ephemeral:
-                    true
-            });
-        }
-
-        const requestType =
-            getRequestType(
-                type
-            );
-
-        // ====================================================
-        // 🔒 CLOSE
-        // ====================================================
-
-        if (
-            action ===
-            "close"
-        ) {
-
-            await interaction.reply(
-                "🔒 הבקשה תיסגר בעוד 5 שניות..."
-            );
-
-            await sendLog(
-
-                guild,
-
-                `🔒 בקשת ${requestType.name} נסגרה`,
-
-                `**משתמש:** <@${request.userId}>\n`
-                + `**צוות:** ${interaction.user.tag}\n`
-                + `**חדר:** ${interaction.channel.name}`
-            );
-
-            setTimeout(
-
-                async () => {
-
-                    const latest =
-                        await getGuildData(
-                            guild.id
-                        );
-
-                    delete latest.requests[
-                        channelId
-                    ];
-
-                    await saveGuildData(
-                        guild.id,
-                        latest
-                    );
-
-                    await interaction.channel
-                        .delete()
-                        .catch(
-                            () => {}
-                        );
-
-                },
-
-                5000
-            );
-
-            return;
-        }
-
-        // ====================================================
-        // אם כבר הוחלט
-        // ====================================================
-
-        if (
-            request.decided
-        ) {
-
-            return interaction.reply({
-
-                content:
-                    "❌ כבר התקבלה החלטה על הבקשה הזאת.",
-
-                ephemeral:
-                    true
-            });
-        }
-
-        const accepted =
-            action ===
-            "approve";
-
-        request.decided =
-            true;
-
-        request.status =
-            accepted
-                ? "approved"
-                : "rejected";
-
-        request.accepted =
-            accepted;
-
-        request.decidedBy =
-            interaction.user.id;
-
-        request.decidedAt =
-            Date.now();
-
-        await saveGuildData(
-            guild.id,
-            config
-        );
-
-        // ====================================================
-        // 📩 DM USER
-        // ====================================================
-
-        const requester =
-            await client.users.fetch(
-                request.userId
-            ).catch(
-                () => null
-            );
-
-        if (requester) {
-
-            const dmEmbed =
-                makeEmbed(
-
-                    guild,
-
-                    accepted
-                        ? `✅ בקשת ${requestType.name} אושרה`
-                        : `❌ בקשת ${requestType.name} נדחתה`,
-
-                    accepted
-
-                        ? `צוות ChillZone אישר את בקשת ${requestType.name} שלך. 💙`
-                        : `צוות ChillZone דחה את בקשת ${requestType.name} שלך.`
-                );
-
-            if (
-                type ===
-                "ban" &&
-                accepted
-            ) {
-
-                dmEmbed.setDescription(
-
-                    "צוות ChillZone אישר את בקשת הסרת הבאן שלך. 💙\n\n"
-                    + "שים לב: אישור הבקשה אינו מסיר את הבאן אוטומטית. "
-                    + "איש צוות צריך לבצע את הסרת הבאן בפועל."
-                );
-            }
-
-            await requester.send({
-
-                embeds: [
-                    dmEmbed
-                ]
-
-            }).catch(
-                () => {}
-            );
-        }
-
-        // ====================================================
-        // 🔵 UPDATE MESSAGE
-        // ====================================================
-
-        const resultEmbed =
-            makeEmbed(
-
-                guild,
-
-                accepted
-                    ? `✅ בקשת ${requestType.name} אושרה`
-                    : `❌ בקשת ${requestType.name} נדחתה`,
-
-                `**משתמש:** <@${request.userId}>\n\n`
-                + `**סטטוס:** ${accepted ? "אושרה ✅" : "נדחתה ❌"}\n`
-                + `**צוות:** ${interaction.user}\n\n`
-                + (
-                    type === "ban" && accepted
-                        ? "ℹ️ הבאן עצמו עדיין דורש הסרה בפועל על ידי צוות."
-                        : ""
-                )
-            );
-
-        await interaction.message.edit({
-
-            embeds: [
-                resultEmbed
-            ],
-
-            components: [
-
-                createRequestButtons(
-                    type,
-                    channelId,
-                    true
-                )
-
-            ]
-        });
-
-        await interaction.reply({
-
+        if (!duration) {
+          return interaction.reply({
             content:
-                accepted
-                    ? `✅ בקשת ${requestType.name} אושרה.`
-                    : `❌ בקשת ${requestType.name} נדחתה.`,
-
-            ephemeral:
-                true
-        });
-
-        await sendLog(
-
-            guild,
-
-            accepted
-                ? `✅ בקשת ${requestType.name} אושרה`
-                : `❌ בקשת ${requestType.name} נדחתה`,
-
-            `**משתמש:** <@${request.userId}>\n`
-            + `**צוות:** ${interaction.user.tag}\n`
-            + `**חדר:** ${interaction.channel}\n`
-            + `**סוג:** ${requestType.name}`
-        );
-
-        return;
-    }
-}
-
-// ============================================================
-// 🛡️ STAFF PANEL
-// ============================================================
-
-async function sendStaffPanel(
-    guild,
-    channel
-) {
-
-    const embed =
-        makeEmbed(
-
-            guild,
-
-            "🛡️ פאנל צוות",
-
-            "פאנל ניהול ChillZone 💙\n\n"
-            + "⏱️ **Timeout** — השתקה זמנית\n"
-            + "🔨 **Ban** — הרחקת משתמש\n"
-            + "👢 **Kick** — הוצאת משתמש\n"
-            + "🔇 **Mute** — הוספה/הסרה של Mute Role\n\n"
-            + "כל פעולה תבקש Discord User ID."
-        );
-
-    const row =
-        new ActionRowBuilder()
-            .addComponents(
-
-                new ButtonBuilder()
-                    .setCustomId(
-                        "staff_timeout"
-                    )
-                    .setLabel(
-                        "Timeout"
-                    )
-                    .setEmoji(
-                        "⏱️"
-                    )
-                    .setStyle(
-                        ButtonStyle.Primary
-                    ),
-
-                new ButtonBuilder()
-                    .setCustomId(
-                        "staff_ban"
-                    )
-                    .setLabel(
-                        "Ban"
-                    )
-                    .setEmoji(
-                        "🔨"
-                    )
-                    .setStyle(
-                        ButtonStyle.Danger
-                    ),
-
-                new ButtonBuilder()
-                    .setCustomId(
-                        "staff_kick"
-                    )
-                    .setLabel(
-                        "Kick"
-                    )
-                    .setEmoji(
-                        "👢"
-                    )
-                    .setStyle(
-                        ButtonStyle.Secondary
-                    ),
-
-                new ButtonBuilder()
-                    .setCustomId(
-                        "staff_mute"
-                    )
-                    .setLabel(
-                        "Mute"
-                    )
-                    .setEmoji(
-                        "🔇"
-                    )
-                    .setStyle(
-                        ButtonStyle.Primary
-                    )
-            );
-
-    await channel.send({
-
-        embeds: [
-            embed
-        ],
-
-        components: [
-            row
-        ]
-    });
-}
-
-// ============================================================
-// 🔗 LINKS PANEL
-// ============================================================
-
-async function sendLinksPanel(
-    guild,
-    channel
-) {
-
-    const config =
-        await getGuildData(
-            guild.id
-        );
-
-    const embed =
-        makeEmbed(
-
-            guild,
-
-            "🔗 הקישורים של ChillZone",
-
-            "כל הקישורים החשובים במקום אחד 💙"
-        );
-
-    if (
-        !config.links.length
-    ) {
-
-        embed.setDescription(
-            "❌ עדיין לא הוגדרו קישורים."
-        );
-
-        await channel.send({
-
-            embeds: [
-                embed
-            ]
-
-        });
-
-        return;
-    }
-
-    const rows = [];
-
-    let row =
-        new ActionRowBuilder();
-
-    for (
-        let i = 0;
-        i < config.links.length;
-        i++
-    ) {
-
-        const link =
-            config.links[i];
-
-        const button =
-            new ButtonBuilder()
-                .setLabel(
-                    clip(
-                        link.name,
-                        80
-                    )
-                )
-                .setURL(
-                    link.url
-                )
-                .setStyle(
-                    ButtonStyle.Link
-                );
-
-        row.addComponents(
-            button
-        );
-
-        if (
-            row.components.length === 5 ||
-            i ===
-                config.links.length - 1
-        ) {
-
-            rows.push(
-                row
-            );
-
-            row =
-                new ActionRowBuilder();
-        }
-    }
-
-    await channel.send({
-
-        embeds: [
-            embed
-        ],
-
-        components:
-            rows
-    });
-}
-
-// ============================================================
-// 💻 COMMAND HANDLER
-// ============================================================
-
-async function handleCommand(
-    interaction
-) {
-
-    const guild =
-        interaction.guild;
-
-    if (!guild) {
-        return;
-    }
-
-    const config =
-        await getGuildData(
-            guild.id
-        );
-
-    const adminCommands = [
-
-        "setup",
-
-        "set-image",
-
-        "set-logs",
-
-        "set-staff",
-
-        "set-mute",
-
-        "set-ai",
-
-        "set-ticket-category",
-
-        "set-ticket-channel",
-
-        "ticket-panel",
-
-        "staff-panel",
-
-        "set-verify",
-
-        "verify-panel",
-
-        "set-welcome",
-
-        "set-suggestions",
-
-        "set-links",
-
-        "add-link",
-
-        "clear-links",
-
-        "links-panel",
-
-        "set-counting",
-
-        "reset-counting",
-
-        // ====================================================
-        // 🕖 DAILY
-        // ====================================================
-
-        "set-daily",
-
-        // ====================================================
-        // 🎫 REQUEST SYSTEM
-        // ====================================================
-
-        "set-request-category",
-
-        "ban-request-panel",
-
-        "adult-request-panel",
-
-        "vip-request-panel"
-
-    ];
-
-    if (
-        adminCommands.includes(
-            interaction.commandName
-        )
-    ) {
-
-        if (
-            !interaction.member.permissions.has(
-                PermissionsBitField.Flags.Administrator
-            )
-        ) {
-
-            return interaction.reply({
-
-                content:
-                    "❌ רק Administrator יכול להשתמש בפקודה הזאת.",
-
-                ephemeral:
-                    true
-            });
-        }
-    }
-
-    // ========================================================
-    // SETUP
-    // ========================================================
-
-    if (
-        interaction.commandName ===
-        "setup"
-    ) {
-
-        const embed =
-            makeEmbed(
-
-                guild,
-
-                "⚙️ ChillZone Setup",
-
-                "**🔵 בסיס:**\n"
-                + "`/set-image` — תמונת הבוט\n"
-                + "`/set-logs` — לוגים\n"
-                + "`/set-staff` — Staff Role\n"
-                + "`/set-mute` — Mute Role\n"
-                + "`/set-ai` — חדר AI\n\n"
-
-                + "**🎫 טיקטים:**\n"
-                + "`/set-ticket-category`\n"
-                + "`/set-ticket-channel`\n"
-                + "`/ticket-panel`\n\n"
-
-                + "**🔐 אימות:**\n"
-                + "`/set-verify`\n"
-                + "`/verify-panel`\n\n"
-
-                + "**👋 Welcome:**\n"
-                + "`/set-welcome`\n\n"
-
-                + "**💡 הצעות:**\n"
-                + "`/set-suggestions`\n"
-                + "`!הצעה הטקסט שלך`\n\n"
-
-                + "**🔗 קישורים:**\n"
-                + "`/set-links`\n"
-                + "`/add-link`\n"
-                + "`/links-panel`\n\n"
-
-                + "**🛡️ צוות:**\n"
-                + "`/staff-panel`\n"
-                + "`!cl 1-100`\n\n"
-
-                + "**🔢 ספירה:**\n"
-                + "`/set-counting`\n"
-                + "`/reset-counting`\n\n"
-
-                + "**🕖 יומי:**\n"
-                + "`/set-daily` — שאלה וחידה כל יום ב־07:00\n\n"
-
-                + "**🎫 בקשות:**\n"
-                + "`/set-request-category`\n"
-                + "`/ban-request-panel`\n"
-                + "`/adult-request-panel`\n"
-                + "`/vip-request-panel`"
-            );
-
-        await interaction.reply({
-
-            embeds: [
-                embed
-            ],
-
-            ephemeral:
-                true
-        });
-
-        return;
-    }
-
-    // ========================================================
-    // IMAGE
-    // ========================================================
-
-    if (
-        interaction.commandName ===
-        "set-image"
-    ) {
-
-        const url =
-            interaction.options.getString(
-                "url"
-            );
-
-        if (
-            !url.startsWith(
-                "http://"
-            ) &&
-            !url.startsWith(
-                "https://"
-            )
-        ) {
-
-            return interaction.reply({
-
-                content:
-                    "❌ זה לא URL תקין.",
-
-                ephemeral:
-                    true
-            });
-        }
-
-        config.botImage =
-            url;
-
-        await saveGuildData(
-            guild.id,
-            config
-        );
-
-        await interaction.reply({
-
-            content:
-                "✅ תמונת הבוט נשמרה ב־PostgreSQL.",
-
-            ephemeral:
-                true
-        });
-
-        return;
-    }
-
-    // ========================================================
-    // LOGS
-    // ========================================================
-
-    if (
-        interaction.commandName ===
-        "set-logs"
-    ) {
-
-        const channel =
-            interaction.options.getChannel(
-                "channel"
-            );
-
-        config.logsChannel =
-            channel.id;
-
-        await saveGuildData(
-            guild.id,
-            config
-        );
-
-        await interaction.reply({
-
-            content:
-                `✅ חדר הלוגים: ${channel}`,
-
-            ephemeral:
-                true
-        });
-
-        return;
-    }
-
-    // ========================================================
-    // STAFF
-    // ========================================================
-
-    if (
-        interaction.commandName ===
-        "set-staff"
-    ) {
-
-        const role =
-            interaction.options.getRole(
-                "role"
-            );
-
-        config.staffRole =
-            role.id;
-
-        await saveGuildData(
-            guild.id,
-            config
-        );
-
-        await interaction.reply({
-
-            content:
-                `✅ Staff Role הוגדר ל־${role}.`,
-
-            ephemeral:
-                true
-        });
-
-        return;
-    }
-
-    // ========================================================
-    // MUTE
-    // ========================================================
-
-    if (
-        interaction.commandName ===
-        "set-mute"
-    ) {
-
-        const role =
-            interaction.options.getRole(
-                "role"
-            );
-
-        config.muteRole =
-            role.id;
-
-        await saveGuildData(
-            guild.id,
-            config
-        );
-
-        await interaction.reply({
-
-            content:
-                `✅ Mute Role הוגדר ל־${role}.`,
-
-            ephemeral:
-                true
-        });
-
-        return;
-    }
-
-    // ========================================================
-    // AI ROOM
-    // ========================================================
-
-    if (
-        interaction.commandName ===
-        "set-ai"
-    ) {
-
-        const channel =
-            interaction.options.getChannel(
-                "channel"
-            );
-
-        config.aiChannel =
-            channel.id;
-
-        config.aiEnabled =
-            true;
-
-        await saveGuildData(
-            guild.id,
-            config
-        );
-
-        await interaction.reply({
-
-            content:
-                `🤖 חדר ה-AI הוגדר ל־${channel}.\n\n`
-                + "מעכשיו הבוט יענה שם בהודעות רגילות.",
-
-            ephemeral:
-                true
-        });
-
-        return;
-    }
-
-    // ========================================================
-    // TICKET CATEGORY
-    // ========================================================
-
-    if (
-        interaction.commandName ===
-        "set-ticket-category"
-    ) {
-
-        const category =
-            interaction.options.getChannel(
-                "category"
-            );
-
-        config.ticketCategory =
-            category.id;
-
-        await saveGuildData(
-            guild.id,
-            config
-        );
-
-        await interaction.reply({
-
-            content:
-                `✅ קטגוריית הטיקטים: ${category}`,
-
-            ephemeral:
-                true
-        });
-
-        return;
-    }
-
-    // ========================================================
-    // TICKET CHANNEL
-    // ========================================================
-
-    if (
-        interaction.commandName ===
-        "set-ticket-channel"
-    ) {
-
-        const channel =
-            interaction.options.getChannel(
-                "channel"
-            );
-
-        config.ticketChannel =
-            channel.id;
-
-        await saveGuildData(
-            guild.id,
-            config
-        );
-
-        await interaction.reply({
-
-            content:
-                `✅ חדר הטיקטים: ${channel}`,
-
-            ephemeral:
-                true
-        });
-
-        return;
-    }
-
-    // ========================================================
-    // TICKET PANEL
-    // ========================================================
-
-    if (
-        interaction.commandName ===
-        "ticket-panel"
-    ) {
-
-        let channel =
-            interaction.channel;
-
-        if (
-            config.ticketChannel
-        ) {
-
-            channel =
-                guild.channels.cache.get(
-                    config.ticketChannel
-                ) || channel;
-        }
-
-        await sendTicketPanel(
-            guild,
-            channel
-        );
-
-        await interaction.reply({
-
-            content:
-                "✅ פאנל הטיקטים נשלח.",
-
-            ephemeral:
-                true
-        });
-
-        return;
-    }
-
-    // ========================================================
-    // VERIFY
-    // ========================================================
-
-    if (
-        interaction.commandName ===
-        "set-verify"
-    ) {
-
-        const channel =
-            interaction.options.getChannel(
-                "channel"
-            );
-
-        const role =
-            interaction.options.getRole(
-                "role"
-            );
-
-        config.verifyChannel =
-            channel.id;
-
-        config.verifyRole =
-            role.id;
-
-        await saveGuildData(
-            guild.id,
-            config
-        );
-
-        await interaction.reply({
-
-            content:
-                `✅ מערכת האימות הוגדרה.\n`
-                + `חדר: ${channel}\n`
-                + `רול: ${role}`,
-
-            ephemeral:
-                true
-        });
-
-        return;
-    }
-
-    // ========================================================
-    // VERIFY PANEL
-    // ========================================================
-
-    if (
-        interaction.commandName ===
-        "verify-panel"
-    ) {
-
-        let channel =
-            interaction.channel;
-
-        if (
-            config.verifyChannel
-        ) {
-
-            channel =
-                guild.channels.cache.get(
-                    config.verifyChannel
-                ) || channel;
-        }
-
-        await sendVerifyPanel(
-            guild,
-            channel
-        );
-
-        await interaction.reply({
-
-            content:
-                "✅ פאנל האימות נשלח.",
-
-            ephemeral:
-                true
-        });
-
-        return;
-    }
-
-    // ========================================================
-    // WELCOME
-    // ========================================================
-
-    if (
-        interaction.commandName ===
-        "set-welcome"
-    ) {
-
-        const channel =
-            interaction.options.getChannel(
-                "channel"
-            );
-
-        config.welcomeChannel =
-            channel.id;
-
-        await saveGuildData(
-            guild.id,
-            config
-        );
-
-        await interaction.reply({
-
-            content:
-                `✅ חדר Welcome: ${channel}`,
-
-            ephemeral:
-                true
-        });
-
-        return;
-    }
-
-    // ========================================================
-    // SUGGESTIONS
-    // ========================================================
-
-    if (
-        interaction.commandName ===
-        "set-suggestions"
-    ) {
-
-        const channel =
-            interaction.options.getChannel(
-                "channel"
-            );
-
-        const staffChannel =
-            interaction.options.getChannel(
-                "staffchannel"
-            );
-
-        const role =
-            interaction.options.getRole(
-                "role"
-            );
-
-        config.suggestionChannel =
-            channel.id;
-
-        config.suggestionStaffChannel =
-            staffChannel.id;
-
-        config.suggestionRole =
-            role.id;
-
-        await saveGuildData(
-            guild.id,
-            config
-        );
-
-        await interaction.reply({
-
-            content:
-                `✅ מערכת ההצעות הוגדרה!\n\n`
-                + `💡 חדר הצעות: ${channel}\n`
-                + `🛡️ חדר צוות: ${staffChannel}\n`
-                + `🔔 רול שיתויג: ${role}`,
-
-            ephemeral:
-                true
-        });
-
-        return;
-    }
-
-    // ========================================================
-    // LINKS
-    // ========================================================
-
-    if (
-        interaction.commandName ===
-        "set-links"
-    ) {
-
-        const channel =
-            interaction.options.getChannel(
-                "channel"
-            );
-
-        config.linksChannel =
-            channel.id;
-
-        await saveGuildData(
-            guild.id,
-            config
-        );
-
-        await interaction.reply({
-
-            content:
-                `✅ חדר הקישורים: ${channel}`,
-
-            ephemeral:
-                true
-        });
-
-        return;
-    }
-
-    if (
-        interaction.commandName ===
-        "add-link"
-    ) {
-
-        const name =
-            interaction.options.getString(
-                "name"
-            );
-
-        const url =
-            interaction.options.getString(
-                "url"
-            );
-
-        if (
-            !url.startsWith(
-                "https://"
-            ) &&
-            !url.startsWith(
-                "http://"
-            )
-        ) {
-
-            return interaction.reply({
-
-                content:
-                    "❌ הקישור חייב להתחיל ב־https:// או http://",
-
-                ephemeral:
-                    true
-            });
-        }
-
-        config.links.push({
-
-            name:
-                name,
-
-            url:
-                url
-        });
-
-        await saveGuildData(
-            guild.id,
-            config
-        );
-
-        await interaction.reply({
-
-            content:
-                `✅ הקישור **${name}** נוסף.`,
-
-            ephemeral:
-                true
-        });
-
-        return;
-    }
-
-    if (
-        interaction.commandName ===
-        "clear-links"
-    ) {
-
-        config.links =
-            [];
-
-        await saveGuildData(
-            guild.id,
-            config
-        );
-
-        await interaction.reply({
-
-            content:
-                "✅ כל הקישורים נמחקו.",
-
-            ephemeral:
-                true
-        });
-
-        return;
-    }
-
-    if (
-        interaction.commandName ===
-        "links-panel"
-    ) {
-
-        let channel =
-            interaction.channel;
-
-        if (
-            config.linksChannel
-        ) {
-
-            channel =
-                guild.channels.cache.get(
-                    config.linksChannel
-                ) || channel;
-        }
-
-        await sendLinksPanel(
-            guild,
-            channel
-        );
-
-        await interaction.reply({
-
-            content:
-                "✅ פאנל הקישורים נשלח.",
-
-            ephemeral:
-                true
-        });
-
-        return;
-    }
-
-    // ========================================================
-    // STAFF PANEL
-    // ========================================================
-
-    if (
-        interaction.commandName ===
-        "staff-panel"
-    ) {
-
-        await sendStaffPanel(
-
-            guild,
-
-            interaction.channel
-        );
-
-        await interaction.reply({
-
-            content:
-                "✅ פאנל הצוות נשלח.",
-
-            ephemeral:
-                true
-        });
-
-        return;
-    }
-
-    // ========================================================
-    // COUNTING
-    // ========================================================
-
-    if (
-        interaction.commandName ===
-        "set-counting"
-    ) {
-
-        const channel =
-            interaction.options.getChannel(
-                "channel"
-            );
-
-        config.countingChannel =
-            channel.id;
-
-        config.countingNumber =
-            0;
-
-        config.lastCounter =
-            null;
-
-        await saveGuildData(
-            guild.id,
-            config
-        );
-
-        await interaction.reply({
-
-            content:
-                `🔢 חדר הספירה הוגדר ל־${channel}.`,
-
-            ephemeral:
-                true
-        });
-
-        return;
-    }
-
-    if (
-        interaction.commandName ===
-        "reset-counting"
-    ) {
-
-        config.countingNumber =
-            0;
-
-        config.lastCounter =
-            null;
-
-        await saveGuildData(
-            guild.id,
-            config
-        );
-
-        await interaction.reply({
-
-            content:
-                "✅ הספירה אופסה ל־0.",
-
-            ephemeral:
-                true
-        });
-
-        return;
-    }
-
-    // ========================================================
-    // 🕖 SET DAILY
-    // ========================================================
-
-    if (
-        interaction.commandName ===
-        "set-daily"
-    ) {
-
-        const channel =
-            interaction.options.getChannel(
-                "channel"
-            );
-
-        config.dailyChannel =
-            channel.id;
-
-        config.dailyLastDate =
-            null;
-
-        await saveGuildData(
-            guild.id,
-            config
-        );
-
-        await interaction.reply({
-
-            content:
-                `✅ חדר השאלה והחידה היומית הוגדר ל־${channel}.\n\n`
-                + "🕖 כל יום בשעה 07:00 לפי שעון ישראל תישלח שאלה וחידה חדשות.",
-
-            ephemeral:
-                true
-        });
-
-        return;
-    }
-
-    // ========================================================
-    // 🎫 REQUEST CATEGORY
-    // ========================================================
-
-    if (
-        interaction.commandName ===
-        "set-request-category"
-    ) {
-
-        const category =
-            interaction.options.getChannel(
-                "category"
-            );
-
-        config.requestCategory =
-            category.id;
-
-        await saveGuildData(
-            guild.id,
-            config
-        );
-
-        await interaction.reply({
-
-            content:
-                `✅ קטגוריית הבקשות הוגדרה ל־${category}.`,
-
-            ephemeral:
-                true
-        });
-
-        return;
-    }
-
-    // ========================================================
-    // 🚫 BAN REQUEST PANEL
-    // ========================================================
-
-    if (
-        interaction.commandName ===
-        "ban-request-panel"
-    ) {
-
-        await sendRequestPanel(
-
-            guild,
-
-            interaction.channel,
-
-            "ban"
-        );
-
-        await interaction.reply({
-
-            content:
-                "✅ פאנל בקשת הסרת באן נשלח.",
-
-            ephemeral:
-                true
-        });
-
-        return;
-    }
-
-    // ========================================================
-    // 🔞 17+ REQUEST PANEL
-    // ========================================================
-
-    if (
-        interaction.commandName ===
-        "adult-request-panel"
-    ) {
-
-        await sendRequestPanel(
-
-            guild,
-
-            interaction.channel,
-
-            "adult"
-        );
-
-        await interaction.reply({
-
-            content:
-                "✅ פאנל בקשת 17+ נשלח.",
-
-            ephemeral:
-                true
-        });
-
-        return;
-    }
-
-    // ========================================================
-    // 💎 VIP REQUEST PANEL
-    // ========================================================
-
-    if (
-        interaction.commandName ===
-        "vip-request-panel"
-    ) {
-
-        await sendRequestPanel(
-
-            guild,
-
-            interaction.channel,
-
-            "vip"
-        );
-
-        await interaction.reply({
-
-            content:
-                "✅ פאנל בקשת VIP נשלח.",
-
-            ephemeral:
-                true
-        });
-
-        return;
-    }
-}
-
-// ============================================================
-// 🛡️ MODALS
-// ============================================================
-
-async function handleModal(
-    interaction
-) {
-
-    const guild =
-        interaction.guild;
-
-    if (
-        !(await isStaffMember(
-            interaction.member
-        ))
-    ) {
-
-        return interaction.reply({
-
-            content:
-                "❌ אין לך הרשאה.",
-
-            ephemeral:
-                true
-        });
-    }
-
-    const config =
-        await getGuildData(
-            guild.id
-        );
-
-    const userId =
-        interaction.fields.getTextInputValue(
-            "user_id"
-        );
-
-    const member =
-        await guild.members.fetch(
-            userId
-        ).catch(
-            () => null
-        );
-
-    if (!member) {
-
-        return interaction.reply({
-
-            content:
-                "❌ המשתמש לא נמצא בשרת.",
-
-            ephemeral:
-                true
-        });
-    }
-
-    // ========================================================
-    // TIMEOUT
-    // ========================================================
-
-    if (
-        interaction.customId ===
-        "modal_timeout"
-    ) {
-
-        const minutes =
-            parseInt(
-
-                interaction.fields.getTextInputValue(
-                    "minutes"
-                )
-
-            );
-
-        if (
-            !Number.isInteger(
-                minutes
-            ) ||
-            minutes < 1 ||
-            minutes > 40320
-        ) {
-
-            return interaction.reply({
-
-                content:
-                    "❌ הכנס זמן בין 1 ל־40320 דקות.",
-
-                ephemeral:
-                    true
-            });
-        }
-
-        if (
-            !member.moderatable
-        ) {
-
-            return interaction.reply({
-
-                content:
-                    "❌ אני לא יכול לעשות Timeout למשתמש הזה.",
-
-                ephemeral:
-                    true
-            });
-        }
-
-        await member.timeout(
-
-            minutes * 60 * 1000,
-
-            `Timeout by ${interaction.user.tag}`
-
-        );
-
-        await interaction.reply({
-
-            content:
-                `✅ ${member.user.tag} קיבל Timeout ל־${minutes} דקות.`,
-
-            ephemeral:
-                true
-        });
-
-        await sendLog(
-
-            guild,
-
-            "⏱️ Timeout",
-
-            `**צוות:** ${interaction.user.tag}\n`
-            + `**משתמש:** ${member.user.tag}\n`
-            + `**זמן:** ${minutes} דקות`
-        );
-
-        return;
-    }
-
-    // ========================================================
-    // BAN
-    // ========================================================
-
-    if (
-        interaction.customId ===
-        "modal_ban"
-    ) {
-
-        if (
-            !member.bannable
-        ) {
-
-            return interaction.reply({
-
-                content:
-                    "❌ אי אפשר לתת Ban למשתמש הזה.",
-
-                ephemeral:
-                    true
-            });
-        }
-
-        await member.ban({
-
-            reason:
-                `Ban by ${interaction.user.tag}`
-        });
-
-        await interaction.reply({
-
-            content:
-                `🔨 ${member.user.tag} קיבל Ban.`,
-
-            ephemeral:
-                true
-        });
-
-        await sendLog(
-
-            guild,
-
-            "🔨 Ban",
-
-            `**צוות:** ${interaction.user.tag}\n`
-            + `**משתמש:** ${member.user.tag}\n`
-            + `**ID:** ${member.id}`
-        );
-
-        return;
-    }
-
-    // ========================================================
-    // KICK
-    // ========================================================
-
-    if (
-        interaction.customId ===
-        "modal_kick"
-    ) {
-
-        if (
-            !member.kickable
-        ) {
-
-            return interaction.reply({
-
-                content:
-                    "❌ אי אפשר לתת Kick למשתמש הזה.",
-
-                ephemeral:
-                    true
-            });
-        }
-
-        await member.kick(
-
-            `Kick by ${interaction.user.tag}`
-
-        );
-
-        await interaction.reply({
-
-            content:
-                `👢 ${member.user.tag} קיבל Kick.`,
-
-            ephemeral:
-                true
-        });
-
-        await sendLog(
-
-            guild,
-
-            "👢 Kick",
-
-            `**צוות:** ${interaction.user.tag}\n`
-            + `**משתמש:** ${member.user.tag}\n`
-            + `**ID:** ${member.id}`
-        );
-
-        return;
-    }
-
-    // ========================================================
-    // MUTE
-    // ========================================================
-
-    if (
-        interaction.customId ===
-        "modal_mute"
-    ) {
-
-        if (
-            !config.muteRole
-        ) {
-
-            return interaction.reply({
-
-                content:
-                    "❌ Mute Role לא הוגדר.",
-
-                ephemeral:
-                    true
-            });
+              '❌ זמן לא תקין. השתמש לדוגמה ב-10m, 1h או 7d.',
+            ephemeral: true,
+          });
         }
 
         const role =
-            guild.roles.cache.get(
-                config.muteRole
-            );
+          guild.roles.cache.get(config[roleKey]);
 
         if (!role) {
-
-            return interaction.reply({
-
-                content:
-                    "❌ Mute Role לא נמצא.",
-
-                ephemeral:
-                    true
-            });
+          return interaction.reply({
+            content: '❌ הרול לא נמצא.',
+            ephemeral: true,
+          });
         }
 
         if (
-            member.roles.cache.has(
-                role.id
-            )
+          role.position >=
+          guild.members.me.roles.highest.position
         ) {
-
-            await member.roles.remove(
-                role
-            );
-
-            await interaction.reply({
-
-                content:
-                    `🔊 ההשתקה של ${member.user.tag} הוסרה.`,
-
-                ephemeral:
-                    true
-            });
-
-            await sendLog(
-
-                guild,
-
-                "🔊 Mute הוסר",
-
-                `**צוות:** ${interaction.user.tag}\n`
-                + `**משתמש:** ${member.user.tag}`
-            );
-
-        } else {
-
-            await member.roles.add(
-                role
-            );
-
-            await interaction.reply({
-
-                content:
-                    `🔇 ${member.user.tag} הושתק.`,
-
-                ephemeral:
-                    true
-            });
-
-            await sendLog(
-
-                guild,
-
-                "🔇 משתמש הושתק",
-
-                `**צוות:** ${interaction.user.tag}\n`
-                + `**משתמש:** ${member.user.tag}`
-            );
+          return interaction.reply({
+            content:
+              '❌ הרול חייב להיות מתחת לרול הגבוה ביותר של הבוט.',
+            ephemeral: true,
+          });
         }
 
+        await target.roles.add(role);
+
+        if (
+          type === 'voicemute' &&
+          target.voice &&
+          target.voice.channel
+        ) {
+          await target.voice
+            .setMute(true, reason)
+            .catch(function () {});
+        }
+
+        const id =
+          guild.id +
+          ':' +
+          target.id +
+          ':' +
+          type;
+
+        data.punishments[id] = {
+          guildId: guild.id,
+          userId: target.id,
+          roleId: role.id,
+          type: type,
+          expires: Date.now() + duration,
+        };
+
+        saveData();
+
+        await interaction.reply({
+          embeds: [
+            embed(
+              '🔇 ' + label,
+              '# ' +
+                target.user.username +
+                '\n\n' +
+                '🔇 **משך:** ' +
+                time +
+                '\n' +
+                '📝 **סיבה:** ' +
+                reason +
+                '\n\n' +
+                'העונש יוסר אוטומטית.'
+            ),
+          ],
+        });
+
+        await sendLog(
+          guild,
+          '⚖️ ' + label,
+          target +
+            ' קיבל ' +
+            label +
+            ' ל-' +
+            time +
+            '.\nסיבה: ' +
+            reason
+        );
+
         return;
+      }
+
+      // ======================================================
+      // REQUEST PANELS
+      // ======================================================
+
+      if (
+        interaction.commandName ===
+        'ban-request-panel'
+      ) {
+        return createRequestPanel(
+          interaction,
+          'ban'
+        );
+      }
+
+      if (
+        interaction.commandName ===
+        'adult-request-panel'
+      ) {
+        return createRequestPanel(
+          interaction,
+          'adult'
+        );
+      }
+
+      if (
+        interaction.commandName ===
+        'vip-request-panel'
+      ) {
+        return createRequestPanel(
+          interaction,
+          'vip'
+        );
+      }
+
+      // ======================================================
+      // TICKET PANEL
+      // ======================================================
+
+      if (
+        interaction.commandName ===
+        'ticket-panel'
+      ) {
+        const menu =
+          new StringSelectMenuBuilder()
+            .setCustomId('ticket_create')
+            .setPlaceholder(
+              '🎫 בחר את סוג הפנייה שלך'
+            )
+            .addOptions(
+              {
+                label: 'תמיכה',
+                description: 'אני צריך עזרה',
+                value: 'support',
+                emoji: '🛠️',
+              },
+              {
+                label: 'דיווח',
+                description: 'דיווח על משתמש',
+                value: 'report',
+                emoji: '🚨',
+              },
+              {
+                label: 'ערעור',
+                description: 'ערעור על עונש',
+                value: 'appeal',
+                emoji: '🔨',
+              },
+              {
+                label: 'VIP',
+                description: 'שאלות בנושא VIP',
+                value: 'vip',
+                emoji: '💎',
+              },
+              {
+                label: 'שאלה',
+                description: 'שאלה כללית',
+                value: 'question',
+                emoji: '❓',
+              }
+            );
+
+        await interaction.channel.send({
+          embeds: [
+            embed(
+              '🎫 CHILLZONE SUPPORT',
+              '# צריכים עזרה? אנחנו כאן 💙\n\n' +
+                'בחרו את סוג הפנייה מהתפריט למטה.\n\n' +
+                '🤖 **AI SUPPORT**\nמיד לאחר פתיחת הטיקט ה-AI יעזור לכם.\n\n' +
+                '👮 **צוות**\nברגע שאיש צוות לוקח את הטיקט, ה-AI מפסיק אוטומטית.\n\n' +
+                '🔒 הפרטיות של הטיקט נשמרת.'
+            ),
+          ],
+          components: [
+            new ActionRowBuilder().addComponents(
+              menu
+            ),
+          ],
+        });
+
+        return interaction.reply({
+          embeds: [
+            successEmbed(
+              'פאנל הטיקטים נשלח!',
+              'הפאנל פעיל עכשיו.'
+            ),
+          ],
+          ephemeral: true,
+        });
+      }
+
+      // ======================================================
+      // PRIVATE PANEL
+      // ======================================================
+
+      if (
+        interaction.commandName ===
+        'private-panel'
+      ) {
+        const row =
+          new ActionRowBuilder().addComponents(
+            new ButtonBuilder()
+              .setCustomId(
+                'private_create'
+              )
+              .setLabel(
+                '🏠 צור חדר חדש'
+              )
+              .setStyle(
+                ButtonStyle.Primary
+              )
+          );
+
+        await interaction.channel.send({
+          embeds: [
+            embed(
+              '🏠 PRIVATE ROOMS',
+              '# החדר הפרטי שלך 💙\n\n' +
+                'רוצה לפתוח שיחה פרטית?\n\n' +
+                'לחץ על **צור חדר חדש**.\n\n' +
+                'אחרי היצירה תקבל:\n' +
+                '💬 חדר שיחה פרטי\n' +
+                '⚙️ חדר הגדרות\n\n' +
+                'בחדר ההגדרות אפשר:\n' +
+                '👥 להוסיף אנשים\n' +
+                '🔒 לפתוח / לסגור את החדר\n' +
+                '🗑️ למחוק את החדר'
+            ),
+          ],
+          components: [row],
+        });
+
+        return interaction.reply({
+          embeds: [
+            successEmbed(
+              'הפאנל נשלח!',
+              'הממברים יכולים עכשיו ליצור חדרים פרטיים.'
+            ),
+          ],
+          ephemeral: true,
+        });
+      }
+
+      // ======================================================
+      // ROLES PANEL
+      // ======================================================
+
+      if (
+        interaction.commandName ===
+        'roles-panel'
+      ) {
+        const menu =
+          new StringSelectMenuBuilder()
+            .setCustomId('roles_select')
+            .setPlaceholder(
+              '🎭 בחר את הרול שלך'
+            )
+            .addOptions(
+              {
+                label: 'VIP',
+                description: 'קבלת רול VIP',
+                value: 'vip',
+                emoji: '💎',
+              },
+              {
+                label: '17+',
+                description: 'קבלת רול 17+',
+                value: 'adult',
+                emoji: '🔞',
+              },
+              {
+                label: 'הסר VIP',
+                description: 'הסרת VIP',
+                value: 'remove_vip',
+                emoji: '❌',
+              },
+              {
+                label: 'הסר Ban',
+                description: 'הסרת Ban Role',
+                value: 'remove_ban',
+                emoji: '🔓',
+              }
+            );
+
+        await interaction.channel.send({
+          embeds: [
+            embed(
+              '🎭 CHILLZONE ROLES',
+              '# בחר את הרול שלך 💙\n\n' +
+                'בחר אפשרות מהתפריט למטה.'
+            ),
+          ],
+          components: [
+            new ActionRowBuilder().addComponents(
+              menu
+            ),
+          ],
+        });
+
+        return interaction.reply({
+          content:
+            '✅ פאנל הרולים נשלח.',
+          ephemeral: true,
+        });
+      }
+
+      // ======================================================
+      // DROP
+      // ======================================================
+
+      if (
+        interaction.commandName ===
+        'drop'
+      ) {
+        const role =
+          interaction.options.getRole(
+            'role'
+          );
+
+        if (
+          role.position >=
+          guild.members.me.roles.highest.position
+        ) {
+          return interaction.reply({
+            content:
+              '❌ הרול חייב להיות מתחת לרול של הבוט.',
+            ephemeral: true,
+          });
+        }
+
+        const button =
+          new ButtonBuilder()
+            .setCustomId(
+              'drop:' + role.id
+            )
+            .setLabel(
+              '🎁 קח את הרול'
+            )
+            .setStyle(
+              ButtonStyle.Primary
+            );
+
+        await interaction.channel.send({
+          embeds: [
+            embed(
+              '🎁 DROP!',
+              '# מי הראשון?\n\n' +
+                'הרול **' +
+                role.name +
+                '** מחכה למישהו אחד.\n\n' +
+                '🏆 הראשון שלוחץ על הכפתור מקבל אותו!'
+            ),
+          ],
+          components: [
+            new ActionRowBuilder().addComponents(
+              button
+            ),
+          ],
+        });
+
+        return interaction.reply({
+          content:
+            '✅ ה-Drop נשלח.',
+          ephemeral: true,
+        });
+      }
+
+      // ======================================================
+      // COUNTING SETUP
+      // ======================================================
+
+      if (
+        interaction.commandName ===
+        'counting'
+      ) {
+        const channel =
+          interaction.options.getChannel(
+            'channel'
+          );
+
+        const config =
+          getConfig(guild.id);
+
+        config.countingChannel =
+          channel.id;
+
+        data.counting[guild.id] = {
+          current: 0,
+          lastUser: null,
+        };
+
+        saveData();
+
+        return interaction.reply({
+          embeds: [
+            successEmbed(
+              'חדר הספירה הוגדר!',
+              '🔢 ' + channel
+            ),
+          ],
+        });
+      }
+
+      // ======================================================
+      // LEVEL
+      // ======================================================
+
+      if (
+        interaction.commandName ===
+        'level'
+      ) {
+        const user =
+          interaction.options.getUser(
+            'user'
+          ) ||
+          interaction.user;
+
+        const key =
+          guild.id +
+          ':' +
+          user.id;
+
+        const level =
+          data.levels[key] || {
+            xp: 0,
+            level: 0,
+          };
+
+        return interaction.reply({
+          embeds: [
+            embed(
+              '📊 CHILLZONE LEVELS',
+              '# ' +
+                user.username +
+                '\n\n' +
+                '🏆 **Level:** ' +
+                level.level +
+                '\n' +
+                '✨ **XP:** ' +
+                level.xp +
+                '\n\n' +
+                'תמשיכו להיות פעילים כדי לעלות רמות! 💙'
+            ),
+          ],
+        });
+      }
+
+      // ======================================================
+      // HELP
+      // ======================================================
+
+      if (
+        interaction.commandName ===
+        'help'
+      ) {
+        return interaction.reply({
+          embeds: [
+            embed(
+              'CHILLZONE',
+              '# 💙 מרכז ChillZone\n\n' +
+                '🤖 **AI**\nשאלות ותשובות חכמות.\n\n' +
+                '🎫 **Tickets**\nפתיחת טיקט עם AI עד לקיחת צוות.\n\n' +
+                '🏠 **Private Rooms**\nחדרי שיחה פרטיים עם מערכת שליטה.\n\n' +
+                '💡 **Suggestions**\nשלחו הצעות עם:\n' +
+                code('!הצעה הטקסט') +
+                '\n\n' +
+                '🆘 **Help**\n' +
+                code('!h') +
+                '\n\n' +
+                '📊 **Levels**\nמערכת XP ורמות.\n\n' +
+                '🎭 **Roles**\nמערכת רולים.\n\n' +
+                '🎁 **Drops**\nDrops עם כפתורים.'
+            ),
+          ],
+        });
+      }
+    }    // ========================================================
+    // REQUEST OPEN
+    // ========================================================
+
+    if (
+      interaction.isButton() &&
+      ['ban', 'adult', 'vip'].some(function (type) {
+        return (
+          interaction.customId ===
+          'request_open_' + type
+        );
+      })
+    ) {
+      const type =
+        interaction.customId.replace(
+          'request_open_',
+          ''
+        );
+
+      return openRequest(
+        interaction,
+        type
+      );
     }
+
+    // ========================================================
+    // REQUEST ACTIONS
+    // ========================================================
+
+    if (
+      interaction.isButton() &&
+      interaction.customId.startsWith(
+        'request_'
+      )
+    ) {
+      const parts =
+        interaction.customId.split(':');
+
+      const action =
+        parts[0].replace(
+          'request_',
+          ''
+        );
+
+      const type = parts[1];
+      const channelId = parts[2];
+
+      const request =
+        data.requests &&
+        data.requests[channelId];
+
+      if (!request) {
+        return interaction.reply({
+          content:
+            '❌ הבקשה לא נמצאה.',
+          ephemeral: true,
+        });
+      }
+
+      if (
+        !isStaff(
+          interaction.member
+        )
+      ) {
+        return interaction.reply({
+          content:
+            '❌ רק הצוות יכול לטפל בבקשות.',
+          ephemeral: true,
+        });
+      }
+
+      const info =
+        requestInfo(type);
+
+      // ======================================================
+      // REQUEST CLOSE
+      // ======================================================
+
+      if (action === 'close') {
+        delete data.requests[channelId];
+        saveData();
+
+        await sendLog(
+          interaction.guild,
+          '🔒 Request Closed',
+          interaction.user +
+            ' סגר בקשת ' +
+            info.label +
+            ' של <@' +
+            request.userId +
+            '>.'
+        );
+
+        await interaction.reply({
+          embeds: [
+            embed(
+              '🔒 הבקשה נסגרת',
+              'החדר יימחק בעוד 5 שניות.'
+            ),
+          ],
+        });
+
+        setTimeout(function () {
+          interaction.channel
+            .delete()
+            .catch(function () {});
+        }, 5000);
+
+        return;
+      }
+
+      // ======================================================
+      // ALREADY DECIDED
+      // ======================================================
+
+      if (
+        request.status !==
+        'open'
+      ) {
+        return interaction.reply({
+          content:
+            '❌ הבקשה כבר קיבלה החלטה.',
+          ephemeral: true,
+        });
+      }
+
+      const approved =
+        action === 'approve';
+
+      request.status =
+        approved
+          ? 'approved'
+          : 'rejected';
+
+      request.decision =
+        approved
+          ? 'approve'
+          : 'reject';
+
+      request.decisionBy =
+        interaction.user.id;
+
+      request.decidedAt =
+        Date.now();
+
+      saveData();
+
+      const decisionText =
+        approved
+          ? 'אושרה ✅'
+          : 'נדחתה ❌';
+
+      await interaction.message
+        .edit({
+          embeds: [
+            embed(
+              info.emoji +
+                ' בקשת ' +
+                info.label,
+              '# הבקשה ' +
+                decisionText +
+                '\n\n' +
+                '👤 **משתמש:** <@' +
+                request.userId +
+                '>\n' +
+                '👮 **טופל על ידי:** ' +
+                interaction.user +
+                '\n\n' +
+                'החלטת הצוות נשמרה.'
+            ),
+          ],
+          components: [
+            requestButtons(
+              type,
+              channelId,
+              true
+            ),
+          ],
+        })
+        .catch(function () {});
+
+      const user =
+        await client.users
+          .fetch(request.userId)
+          .catch(function () {
+            return null;
+          });
+
+      if (user) {
+        await user
+          .send({
+            embeds: [
+              embed(
+                approved
+                  ? '✅ הבקשה אושרה'
+                  : '❌ הבקשה נדחתה',
+                'בקשת **' +
+                  info.label +
+                  '** שלך בשרת **' +
+                  interaction.guild.name +
+                  '** ' +
+                  decisionText +
+                  '.\n\n' +
+                  '👮 טופל על ידי: ' +
+                  interaction.user.username
+              ),
+            ],
+          })
+          .catch(function () {});
+      }
+
+      await sendLog(
+        interaction.guild,
+        approved
+          ? '✅ Request Approved'
+          : '❌ Request Rejected',
+        interaction.user +
+          ' ' +
+          (approved
+            ? 'אישר'
+            : 'דחה') +
+          ' בקשת ' +
+          info.label +
+          ' של <@' +
+          request.userId +
+          '>.'
+      );
+
+      return interaction.reply({
+        embeds: [
+          successEmbed(
+            approved
+              ? 'הבקשה אושרה!'
+              : 'הבקשה נדחתה!',
+            'המשתמש עודכן בהודעה פרטית.'
+          ),
+        ],
+        ephemeral: true,
+      });
+    }
+
+    // ========================================================
+    // TICKET CREATE
+    // ========================================================
+
+    if (
+      interaction.isStringSelectMenu() &&
+      interaction.customId ===
+        'ticket_create'
+    ) {
+      const guild =
+        interaction.guild;
+
+      const config =
+        getConfig(guild.id);
+
+      if (!config.ticketCategory) {
+        return interaction.reply({
+          embeds: [
+            embed(
+              '⚠️ חסרה הגדרה',
+              'אדמין צריך להגדיר Ticket Category.'
+            ),
+          ],
+          ephemeral: true,
+        });
+      }
+
+      const existing =
+        Object.values(
+          data.tickets
+        ).find(function (ticket) {
+          return (
+            ticket.guildId ===
+              guild.id &&
+            ticket.userId ===
+              interaction.user.id
+          );
+        });
+
+      if (existing) {
+        return interaction.reply({
+          embeds: [
+            embed(
+              '🎫 כבר יש לך טיקט',
+              'הטיקט שלך נמצא כאן:\n<#' +
+                existing.channelId +
+                '>'
+            ),
+          ],
+          ephemeral: true,
+        });
+      }
+
+      const type =
+        interaction.values[0];
+
+      const channel =
+        await guild.channels.create({
+          name: safeChannelName(
+            'ticket',
+            interaction.user.username
+          ),
+          type: ChannelType.GuildText,
+          parent:
+            config.ticketCategory,
+
+          permissionOverwrites: [
+            {
+              id:
+                guild.roles.everyone.id,
+              deny: [
+                PermissionFlagsBits.ViewChannel,
+              ],
+            },
+
+            {
+              id:
+                interaction.user.id,
+              allow: [
+                PermissionFlagsBits.ViewChannel,
+                PermissionFlagsBits.SendMessages,
+                PermissionFlagsBits.ReadMessageHistory,
+              ],
+            },
+          ],
+        });
+
+      if (config.staffRole) {
+        await channel.permissionOverwrites.create(
+          config.staffRole,
+          {
+            ViewChannel: true,
+            SendMessages: true,
+            ReadMessageHistory: true,
+          }
+        );
+      }
+
+      data.tickets[channel.id] = {
+        channelId: channel.id,
+        guildId: guild.id,
+        userId:
+          interaction.user.id,
+        claimedBy: null,
+        type: type,
+        createdAt: Date.now(),
+      };
+
+      saveData();
+
+      const controls =
+        new ActionRowBuilder().addComponents(
+          new ButtonBuilder()
+            .setCustomId(
+              'ticket_claim'
+            )
+            .setLabel(
+              '👤 קח טיקט'
+            )
+            .setStyle(
+              ButtonStyle.Primary
+            ),
+
+          new ButtonBuilder()
+            .setCustomId(
+              'ticket_close'
+            )
+            .setLabel(
+              '🔒 סגור טיקט'
+            )
+            .setStyle(
+              ButtonStyle.Danger
+            )
+        );
+
+      await channel.send({
+        content:
+          '<@' +
+          interaction.user.id +
+          '>',
+
+        embeds: [
+          embed(
+            '🎫 CHILLZONE TICKET',
+            '# הטיקט שלך נפתח 💙\n\n' +
+              '📁 **סוג:** ' +
+              type +
+              '\n\n' +
+              '## 🤖 AI SUPPORT\n' +
+              'ה-AI פעיל עכשיו ויעזור לך.\n\n' +
+              '## 👮 STAFF\n' +
+              'ברגע שאיש צוות ילחץ על **קח טיקט** — ה-AI יפסיק לענות.\n\n' +
+              '🔒 הטיקט פרטי.'
+          ),
+        ],
+
+        components: [controls],
+      });
+
+      await sendLog(
+        guild,
+        '🎫 Ticket Created',
+        interaction.user +
+          ' פתח טיקט מסוג **' +
+          type +
+          '**.\n\nחדר: ' +
+          channel
+      );
+
+      return interaction.reply({
+        embeds: [
+          successEmbed(
+            'הטיקט נפתח!',
+            'הטיקט שלך כאן:\n' +
+              channel
+          ),
+        ],
+        ephemeral: true,
+      });
+    }
+
+    // ========================================================
+    // PRIVATE CREATE
+    // ========================================================
+
+    if (
+      interaction.isButton() &&
+      interaction.customId ===
+        'private_create'
+    ) {
+      const guild =
+        interaction.guild;
+
+      const config =
+        getConfig(guild.id);
+
+      if (!config.privateCategory) {
+        return interaction.reply({
+          embeds: [
+            embed(
+              '⚠️ חסרה הגדרה',
+              'אדמין צריך להגדיר Private Rooms Category.'
+            ),
+          ],
+          ephemeral: true,
+        });
+      }
+
+      const already =
+        Object.values(
+          data.privateRooms
+        ).find(function (room) {
+          return (
+            room.guildId ===
+              guild.id &&
+            room.ownerId ===
+              interaction.user.id
+          );
+        });
+
+      if (already) {
+        return interaction.reply({
+          embeds: [
+            embed(
+              '🏠 כבר יש לך חדר',
+              'החדר שלך נמצא כאן:\n<#' +
+                already.chatChannelId +
+                '>'
+            ),
+          ],
+          ephemeral: true,
+        });
+      }
+
+      const owner =
+        interaction.user;
+
+      const overwrites = [
+        {
+          id:
+            guild.roles.everyone.id,
+          deny: [
+            PermissionFlagsBits.ViewChannel,
+          ],
+        },
+
+        {
+          id: owner.id,
+          allow: [
+            PermissionFlagsBits.ViewChannel,
+            PermissionFlagsBits.SendMessages,
+            PermissionFlagsBits.ReadMessageHistory,
+          ],
+        },
+      ];
+
+      const chat =
+        await guild.channels.create({
+          name: safeChannelName(
+            'chat',
+            owner.username
+          ),
+          type:
+            ChannelType.GuildText,
+          parent:
+            config.privateCategory,
+          permissionOverwrites:
+            overwrites,
+        });
+
+      const settings =
+        await guild.channels.create({
+          name: safeChannelName(
+            'settings',
+            owner.username
+          ),
+          type:
+            ChannelType.GuildText,
+          parent:
+            config.privateCategory,
+          permissionOverwrites:
+            overwrites,
+        });
+
+      data.privateRooms[
+        settings.id
+      ] = {
+        guildId:
+          guild.id,
+        ownerId:
+          owner.id,
+        chatChannelId:
+          chat.id,
+        settingsChannelId:
+          settings.id,
+        members: [owner.id],
+        locked: true,
+      };
+
+      saveData();
+
+      await chat.send({
+        embeds: [
+          embed(
+            '🏠 PRIVATE ROOM',
+            '# החדר הפרטי שלך מוכן! 💙\n\n' +
+              '👑 **בעל החדר:** ' +
+              owner +
+              '\n\n' +
+              'זהו חדר שיחה פרטי.\n\n' +
+              '⚙️ לניהול החדר עבור ל:\n' +
+              settings +
+              '\n\n' +
+              'שם אפשר להוסיף אנשים, לפתוח את החדר או למחוק אותו.'
+          ),
+        ],
+      });
+
+      const settingsButtons =
+        new ActionRowBuilder().addComponents(
+          new ButtonBuilder()
+            .setCustomId(
+              'private_add'
+            )
+            .setLabel(
+              '👥 הוסף משתמש'
+            )
+            .setStyle(
+              ButtonStyle.Primary
+            ),
+
+          new ButtonBuilder()
+            .setCustomId(
+              'private_toggle'
+            )
+            .setLabel(
+              '🔓 פתח / נעל'
+            )
+            .setStyle(
+              ButtonStyle.Secondary
+            ),
+
+          new ButtonBuilder()
+            .setCustomId(
+              'private_delete'
+            )
+            .setLabel(
+              '🗑️ מחק חדר'
+            )
+            .setStyle(
+              ButtonStyle.Danger
+            )
+        );
+
+      await settings.send({
+        embeds: [
+          embed(
+            '⚙️ PRIVATE ROOM SETTINGS',
+            '# ניהול החדר שלך 💙\n\n' +
+              '👑 **בעלים:** ' +
+              owner +
+              '\n\n' +
+              '👥 **חברי החדר:**\n<@' +
+              owner.id +
+              '>\n\n' +
+              '🔒 **מצב:** נעול\n\n' +
+              'השתמש בכפתורים למטה כדי לנהל את החדר.'
+          ),
+        ],
+        components: [
+          settingsButtons,
+        ],
+      });
+
+      await sendLog(
+        guild,
+        '🏠 Private Room Created',
+        owner +
+          ' יצר חדר פרטי.\n\n💬 ' +
+          chat +
+          '\n⚙️ ' +
+          settings
+      );
+
+      return interaction.reply({
+        embeds: [
+          successEmbed(
+            'החדר נוצר!',
+            '💬 **שיחה:** ' +
+              chat +
+              '\n\n⚙️ **הגדרות:** ' +
+              settings
+          ),
+        ],
+        ephemeral: true,
+      });
+    }
+
+    // ========================================================
+    // PRIVATE ADD
+    // ========================================================
+
+    if (
+      interaction.isButton() &&
+      interaction.customId ===
+        'private_add'
+    ) {
+      const room =
+        data.privateRooms[
+          interaction.channel.id
+        ];
+
+      if (!room) {
+        return interaction.reply({
+          content:
+            '❌ זה לא חדר הגדרות של Private Room.',
+          ephemeral: true,
+        });
+      }
+
+      if (
+        room.ownerId !==
+        interaction.user.id
+      ) {
+        return interaction.reply({
+          content:
+            '❌ רק בעל החדר יכול לנהל אותו.',
+          ephemeral: true,
+        });
+      }
+
+      await interaction.reply({
+        content:
+          '👤 כתוב עכשיו את ה-ID של המשתמש שאתה רוצה להוסיף.',
+        ephemeral: true,
+      });
+
+      const collector =
+        interaction.channel.createMessageCollector({
+          filter: function (message) {
+            return (
+              message.author.id ===
+              interaction.user.id
+            );
+          },
+          time: 30000,
+          max: 1,
+        });
+
+      collector.on(
+        'collect',
+        async function (message) {
+          const userId =
+            message.content
+              .replace(/[<@!>]/g, '')
+              .trim();
+
+          const user =
+            await guildMember(
+              interaction.guild,
+              userId
+            );
+
+          if (!user) {
+            await message
+              .reply(
+                '❌ משתמש לא נמצא.'
+              )
+              .catch(function () {});
+
+            return;
+          }
+
+          if (
+            room.members.includes(
+              user.id
+            )
+          ) {
+            await message
+              .reply(
+                '❌ המשתמש כבר בחדר.'
+              )
+              .catch(function () {});
+
+            return;
+          }
+
+          room.members.push(
+            user.id
+          );
+
+          const chat =
+            interaction.guild.channels.cache.get(
+              room.chatChannelId
+            );
+
+          if (chat) {
+            await chat.permissionOverwrites.create(
+              user.id,
+              {
+                ViewChannel: true,
+                SendMessages: true,
+                ReadMessageHistory: true,
+              }
+            );
+          }
+
+          saveData();
+
+          await message
+            .reply({
+              embeds: [
+                successEmbed(
+                  'המשתמש נוסף!',
+                  user +
+                    ' קיבל גישה לחדר.'
+                ),
+              ],
+            })
+            .catch(function () {});
+
+          await sendLog(
+            interaction.guild,
+            '👥 Private Room Member Added',
+            user +
+              ' נוסף לחדר של <@' +
+              room.ownerId +
+              '>.'
+          );
+        }
+      );
+
+      return;
+    }
+
+    // ========================================================
+    // PRIVATE TOGGLE
+    // ========================================================
+
+    if (
+      interaction.isButton() &&
+      interaction.customId ===
+        'private_toggle'
+    ) {
+      const room =
+        data.privateRooms[
+          interaction.channel.id
+        ];
+
+      if (!room) {
+        return interaction.reply({
+          content:
+            '❌ החדר לא נמצא.',
+          ephemeral: true,
+        });
+      }
+
+      if (
+        room.ownerId !==
+        interaction.user.id
+      ) {
+        return interaction.reply({
+          content:
+            '❌ רק בעל החדר יכול לעשות את זה.',
+          ephemeral: true,
+        });
+      }
+
+      const chat =
+        interaction.guild.channels.cache.get(
+          room.chatChannelId
+        );
+
+      if (!chat) {
+        return interaction.reply({
+          content:
+            '❌ חדר השיחה לא נמצא.',
+          ephemeral: true,
+        });
+      }
+
+      room.locked =
+        !room.locked;
+
+      await chat.permissionOverwrites.edit(
+        interaction.guild.roles.everyone,
+        {
+          ViewChannel: false,
+        }
+      );
+
+      for (
+        const memberId of room.members
+      ) {
+        await chat.permissionOverwrites.edit(
+          memberId,
+          {
+            ViewChannel: true,
+            SendMessages: true,
+            ReadMessageHistory: true,
+          }
+        ).catch(function () {});
+      }
+
+      saveData();
+
+      return interaction.reply({
+        embeds: [
+          successEmbed(
+            room.locked
+              ? 'החדר ננעל'
+              : 'החדר נפתח',
+            room.locked
+              ? 'רק המשתמשים שהוגדרו בחדר יכולים לראות אותו.'
+              : 'החדר עדיין פרטי, אבל כל חברי הרשימה יכולים להיכנס.'
+          ),
+        ],
+        ephemeral: true,
+      });
+    }
+
+    // ========================================================
+    // PRIVATE DELETE
+    // ========================================================
+
+    if (
+      interaction.isButton() &&
+      interaction.customId ===
+        'private_delete'
+    ) {
+      const room =
+        data.privateRooms[
+          interaction.channel.id
+        ];
+
+      if (!room) {
+        return interaction.reply({
+          content:
+            '❌ החדר לא נמצא.',
+          ephemeral: true,
+        });
+      }
+
+      if (
+        room.ownerId !==
+        interaction.user.id
+      ) {
+        return interaction.reply({
+          content:
+            '❌ רק בעל החדר יכול למחוק אותו.',
+          ephemeral: true,
+        });
+      }
+
+      const chat =
+        interaction.guild.channels.cache.get(
+          room.chatChannelId
+        );
+
+      const settings =
+        interaction.channel;
+
+      delete data.privateRooms[
+        interaction.channel.id
+      ];
+
+      saveData();
+
+      await interaction.reply({
+        embeds: [
+          embed(
+            '🗑️ מוחק חדר',
+            'החדר הפרטי יימחק בעוד 3 שניות.'
+          ),
+        ],
+      });
+
+      await sendLog(
+        interaction.guild,
+        '🗑️ Private Room Deleted',
+        interaction.user +
+          ' מחק את החדר הפרטי.'
+      );
+
+      setTimeout(
+        async function () {
+          await chat
+            ?.delete()
+            .catch(function () {});
+
+          await settings
+            ?.delete()
+            .catch(function () {});
+        },
+        3000
+      );
+
+      return;
+    }
+
+    // ========================================================
+    // ROLE SELECT
+    // ========================================================
+
+    if (
+      interaction.isStringSelectMenu() &&
+      interaction.customId ===
+        'roles_select'
+    ) {
+      const config =
+        getConfig(
+          interaction.guild.id
+        );
+
+      const choice =
+        interaction.values[0];
+
+      if (choice === 'vip') {
+        if (!config.vipRole) {
+          return interaction.reply({
+            content:
+              '❌ VIP Role לא הוגדר.',
+            ephemeral: true,
+          });
+        }
+
+        const role =
+          interaction.guild.roles.cache.get(
+            config.vipRole
+          );
+
+        if (!role) {
+          return interaction.reply({
+            content:
+              '❌ VIP Role לא נמצא.',
+            ephemeral: true,
+          });
+        }
+
+        if (
+          role.position >=
+          interaction.guild.members.me
+            .roles.highest.position
+        ) {
+          return interaction.reply({
+            content:
+              '❌ הבוט לא יכול לתת את הרול הזה.',
+            ephemeral: true,
+          });
+        }
+
+        await interaction.member.roles
+          .add(role)
+          .catch(function () {});
+
+        return interaction.reply({
+          embeds: [
+            successEmbed(
+              'VIP נוסף!',
+              'קיבלת את רול ה-VIP 💎'
+            ),
+          ],
+          ephemeral: true,
+        });
+      }
+
+      if (choice === 'adult') {
+        if (!config.adultRole) {
+          return interaction.reply({
+            content:
+              '❌ 17+ Role לא הוגדר.',
+            ephemeral: true,
+          });
+        }
+
+        const role =
+          interaction.guild.roles.cache.get(
+            config.adultRole
+          );
+
+        if (!role) {
+          return interaction.reply({
+            content:
+              '❌ 17+ Role לא נמצא.',
+            ephemeral: true,
+          });
+        }
+
+        if (
+          role.position >=
+          interaction.guild.members.me
+            .roles.highest.position
+        ) {
+          return interaction.reply({
+            content:
+              '❌ הבוט לא יכול לתת את הרול הזה.',
+            ephemeral: true,
+          });
+        }
+
+        await interaction.member.roles
+          .add(role)
+          .catch(function () {});
+
+        return interaction.reply({
+          embeds: [
+            successEmbed(
+              '17+ נוסף!',
+              'קיבלת את רול ה-17+ 🔞'
+            ),
+          ],
+          ephemeral: true,
+        });
+      }
+
+      if (
+        choice ===
+        'remove_vip'
+      ) {
+        if (config.vipRole) {
+          await interaction.member.roles
+            .remove(
+              config.vipRole
+            )
+            .catch(function () {});
+        }
+
+        return interaction.reply({
+          embeds: [
+            successEmbed(
+              'VIP הוסר',
+              'רול ה-VIP הוסר ממך.'
+            ),
+          ],
+          ephemeral: true,
+        });
+      }
+
+      if (
+        choice ===
+        'remove_ban'
+      ) {
+        if (config.banRole) {
+          await interaction.member.roles
+            .remove(
+              config.banRole
+            )
+            .catch(function () {});
+        }
+
+        return interaction.reply({
+          embeds: [
+            successEmbed(
+              'Ban הוסר',
+              'רול ה-Ban הוסר.'
+            ),
+          ],
+          ephemeral: true,
+        });
+      }
+    }
+
+    // ========================================================
+    // DROP BUTTON
+    // ========================================================
+
+    if (
+      interaction.isButton() &&
+      interaction.customId.startsWith(
+        'drop:'
+      )
+    ) {
+      const roleId =
+        interaction.customId
+          .split(':')[1];
+
+      const role =
+        interaction.guild.roles.cache.get(
+          roleId
+        );
+
+      if (!role) {
+        return interaction.reply({
+          content:
+            '❌ הרול לא נמצא.',
+          ephemeral: true,
+        });
+      }
+
+      if (
+        role.position >=
+        interaction.guild.members.me
+          .roles.highest.position
+      ) {
+        return interaction.reply({
+          content:
+            '❌ הרול חייב להיות מתחת לרול של הבוט.',
+          ephemeral: true,
+        });
+      }
+
+      if (
+        interaction.member.roles.cache.has(
+          role.id
+        )
+      ) {
+        return interaction.reply({
+          content:
+            '❌ כבר יש לך את הרול הזה.',
+          ephemeral: true,
+        });
+      }
+
+      const added =
+        await interaction.member.roles
+          .add(role)
+          .then(function () {
+            return true;
+          })
+          .catch(function () {
+            return false;
+          });
+
+      if (!added) {
+        return interaction.reply({
+          content:
+            '❌ הבוט לא הצליח לתת את הרול. בדוק הרשאות ומיקום רולים.',
+          ephemeral: true,
+        });
+      }
+
+      await interaction.message
+        .edit({
+          embeds: [
+            embed(
+              '🎁 DROP הסתיים!',
+              '# יש לנו זוכה! 🏆\n\n' +
+                interaction.user +
+                ' היה הראשון ולקח את ' +
+                role +
+                '!'
+            ),
+          ],
+          components: [],
+        })
+        .catch(function () {});
+
+      return interaction.reply({
+        embeds: [
+          successEmbed(
+            'זכית!',
+            'קיבלת את ' +
+              role +
+              ' 🎉'
+          ),
+        ],
+        ephemeral: true,
+      });
+    }
+
+    // ========================================================
+    // TICKET CLAIM
+    // ========================================================
+
+    if (
+      interaction.isButton() &&
+      interaction.customId ===
+        'ticket_claim'
+    ) {
+      const ticket =
+        data.tickets[
+          interaction.channel.id
+        ];
+
+      if (!ticket) {
+        return interaction.reply({
+          content:
+            '❌ טיקט לא נמצא.',
+          ephemeral: true,
+        });
+      }
+
+      if (
+        !isStaff(
+          interaction.member
+        )
+      ) {
+        return interaction.reply({
+          content:
+            '❌ רק צוות יכול לקחת טיקט.',
+          ephemeral: true,
+        });
+      }
+
+      if (ticket.claimedBy) {
+        return interaction.reply({
+          content:
+            '❌ הטיקט כבר נלקח על ידי <@' +
+            ticket.claimedBy +
+            '>.',
+          ephemeral: true,
+        });
+      }
+
+      ticket.claimedBy =
+        interaction.user.id;
+
+      saveData();
+
+      await interaction.channel.send({
+        embeds: [
+          embed(
+            '👤 TICKET CLAIMED',
+            '# הצוות הגיע! 💙\n\n' +
+              interaction.user +
+              ' לקח את הטיקט.\n\n' +
+              '🔕 **ה-AI הופסק אוטומטית.**\n\n' +
+              'מכאן הצוות מטפל בפנייה.'
+          ),
+        ],
+      });
+
+      await sendLog(
+        interaction.guild,
+        '👤 Ticket Claimed',
+        interaction.user +
+          ' לקח את הטיקט של <@' +
+          ticket.userId +
+          '>.'
+      );
+
+      return interaction.reply({
+        embeds: [
+          successEmbed(
+            'הטיקט נלקח!',
+            'ה-AI הופסק. עכשיו הצוות מטפל בטיקט.'
+          ),
+        ],
+        ephemeral: true,
+      });
+    }
+
+    // ========================================================
+    // TICKET CLOSE
+    // ========================================================
+
+    if (
+      interaction.isButton() &&
+      interaction.customId ===
+        'ticket_close'
+    ) {
+      const ticket =
+        data.tickets[
+          interaction.channel.id
+        ];
+
+      if (!ticket) {
+        return interaction.reply({
+          content:
+            '❌ טיקט לא נמצא.',
+          ephemeral: true,
+        });
+      }
+
+      const owner =
+        ticket.userId ===
+        interaction.user.id;
+
+      const staff =
+        isStaff(
+          interaction.member
+        );
+
+      if (!owner && !staff) {
+        return interaction.reply({
+          content:
+            '❌ אין לך הרשאה לסגור את הטיקט.',
+          ephemeral: true,
+        });
+      }
+
+      delete data.tickets[
+        interaction.channel.id
+      ];
+
+      saveData();
+
+      await interaction.reply({
+        embeds: [
+          embed(
+            '🔒 TICKET CLOSED',
+            'הטיקט יימחק בעוד 5 שניות.'
+          ),
+        ],
+      });
+
+      await sendLog(
+        interaction.guild,
+        '🔒 Ticket Closed',
+        interaction.user +
+          ' סגר את הטיקט.'
+      );
+
+      setTimeout(
+        async function () {
+          await interaction.channel
+            .delete()
+            .catch(function () {});
+        },
+        5000
+      );
+    }
+  } catch (error) {
+    console.error(
+      'Interaction error:',
+      error
+    );
+
+    try {
+      if (
+        interaction.deferred ||
+        interaction.replied
+      ) {
+        await interaction.followUp({
+          content:
+            '❌ אירעה שגיאה. בדוק את הלוגים של Render.',
+          ephemeral: true,
+        });
+      } else {
+        await interaction.reply({
+          content:
+            '❌ אירעה שגיאה. בדוק את הלוגים של Render.',
+          ephemeral: true,
+        });
+      }
+    } catch (replyError) {
+      console.error(
+        'Interaction error reply failed:',
+        replyError
+      );
+    }
+  }
+});
+
+// ============================================================
+// MEMBER FETCH
+// ============================================================
+
+async function guildMember(
+  guild,
+  id
+) {
+  try {
+    return await guild.members.fetch(
+      id
+    );
+  } catch (error) {
+    return null;
+  }
 }
 
 // ============================================================
-// 🔢 COUNTING
+// TEMP PUNISHMENTS
 // ============================================================
 
-client.on(
-    "messageCreate",
-    async message => {
+setInterval(
+  async function () {
+    const now = Date.now();
+    let changed = false;
 
-        if (
-            message.author.bot ||
-            !message.guild
-        ) {
-            return;
-        }
+    for (
+      const [id, punishment] of Object.entries(
+        data.punishments
+      )
+    ) {
+      if (
+        now <
+        punishment.expires
+      ) {
+        continue;
+      }
 
-        const config =
-            await getGuildData(
-                message.guild.id
-            );
+      const guild =
+        client.guilds.cache.get(
+          punishment.guildId
+        );
 
-        if (
-            !config.countingChannel ||
-            message.channel.id !==
-                config.countingChannel
-        ) {
-            return;
-        }
-
-        const number =
-            parseInt(
-                message.content.trim()
-            );
-
-        if (
-            Number.isNaN(
-                number
+      if (guild) {
+        const member =
+          await guild.members
+            .fetch(
+              punishment.userId
             )
-        ) {
-            return;
+            .catch(function () {
+              return null;
+            });
+
+        if (member) {
+          await member.roles
+            .remove(
+              punishment.roleId
+            )
+            .catch(function () {});
+
+          if (
+            punishment.type ===
+              'voicemute' &&
+            member.voice &&
+            member.voice.channel
+          ) {
+            await member.voice
+              .setMute(false)
+              .catch(function () {});
+          }
+
+          await sendLog(
+            guild,
+            '⏰ Punishment Expired',
+            '<@' +
+              punishment.userId +
+              '> הוסר ממנו העונש באופן אוטומטי.'
+          );
         }
+      }
 
-        const expected =
-            config.countingNumber + 1;
-
-        if (
-            number !== expected ||
-            config.lastCounter ===
-                message.author.id
-        ) {
-
-            await message.react(
-                "❌"
-            ).catch(
-                () => {}
-            );
-
-            config.countingNumber =
-                0;
-
-            config.lastCounter =
-                null;
-
-            await saveGuildData(
-
-                message.guild.id,
-
-                config
-            );
-
-            await message.channel.send(
-                "❌ הספירה נשברה! מתחילים מחדש מ־**1**."
-            );
-
-            return;
-        }
-
-        config.countingNumber =
-            number;
-
-        config.lastCounter =
-            message.author.id;
-
-        await saveGuildData(
-
-            message.guild.id,
-
-            config
-        );
-
-        await message.react(
-            "✅"
-        ).catch(
-            () => {}
-        );
+      delete data.punishments[id];
+      changed = true;
     }
+
+    if (changed) {
+      saveData();
+    }
+  },
+  30000
 );
 
 // ============================================================
-// 🗑️ MESSAGE DELETE LOG
+// ERRORS
 // ============================================================
 
 client.on(
-    "messageDelete",
-    async message => {
-
-        if (
-            !message.guild ||
-            message.author?.bot
-        ) {
-            return;
-        }
-
-        await sendLog(
-
-            message.guild,
-
-            "🗑️ הודעה נמחקה",
-
-            `**משתמש:** ${message.author?.tag || "לא ידוע"}\n`
-            + `**ID:** ${message.author?.id || "לא ידוע"}\n`
-            + `**חדר:** ${message.channel}\n`
-            + `**תוכן:** ${clip(cleanMentions(message.content || "אין תוכן"), 1000)}`
-        );
-    }
-);
-
-// ============================================================
-// ✏️ MESSAGE EDIT LOG
-// ============================================================
-
-client.on(
-    "messageUpdate",
-    async (
-        oldMessage,
-        newMessage
-    ) => {
-
-        if (
-            !newMessage.guild ||
-            newMessage.author?.bot
-        ) {
-            return;
-        }
-
-        if (
-            oldMessage.content ===
-            newMessage.content
-        ) {
-            return;
-        }
-
-        await sendLog(
-
-            newMessage.guild,
-
-            "✏️ הודעה נערכה",
-
-            `**משתמש:** ${newMessage.author?.tag || "לא ידוע"}\n`
-            + `**חדר:** ${newMessage.channel}\n\n`
-            + `**לפני:** ${clip(cleanMentions(oldMessage.content || "לא ידוע"), 800)}\n`
-            + `**אחרי:** ${clip(cleanMentions(newMessage.content || "לא ידוע"), 800)}`
-        );
-    }
-);
-
-// ============================================================
-// 👥 ROLE LOG
-// ============================================================
-
-client.on(
-    "guildMemberUpdate",
-    async (
-        oldMember,
-        newMember
-    ) => {
-
-        const added =
-            newMember.roles.cache.filter(
-
-                role =>
-                    !oldMember.roles.cache.has(
-                        role.id
-                    )
-            );
-
-        const removed =
-            oldMember.roles.cache.filter(
-
-                role =>
-                    !newMember.roles.cache.has(
-                        role.id
-                    )
-            );
-
-        for (
-            const role of added.values()
-        ) {
-
-            await sendLog(
-
-                newMember.guild,
-
-                "➕ רול נוסף",
-
-                `**משתמש:** ${newMember.user.tag}\n`
-                + `**רול:** ${role}\n`
-                + `**ID:** ${newMember.id}`
-            );
-        }
-
-        for (
-            const role of removed.values()
-        ) {
-
-            await sendLog(
-
-                newMember.guild,
-
-                "➖ רול הוסר",
-
-                `**משתמש:** ${newMember.user.tag}\n`
-                + `**רול:** ${role}\n`
-                + `**ID:** ${newMember.id}`
-            );
-        }
-
-        if (
-            oldMember.nickname !==
-            newMember.nickname
-        ) {
-
-            await sendLog(
-
-                newMember.guild,
-
-                "✏️ Nickname השתנה",
-
-                `**משתמש:** ${newMember.user.tag}\n`
-                + `**לפני:** ${oldMember.nickname || "אין"}\n`
-                + `**אחרי:** ${newMember.nickname || "אין"}`
-            );
-        }
-    }
-);
-
-// ============================================================
-// 🔊 VOICE LOG
-// ============================================================
-
-client.on(
-    "voiceStateUpdate",
-    async (
-        oldState,
-        newState
-    ) => {
-
-        if (
-            !newState.guild
-        ) {
-            return;
-        }
-
-        if (
-            !oldState.channel &&
-            newState.channel
-        ) {
-
-            await sendLog(
-
-                newState.guild,
-
-                "🔊 כניסה לחדר קולי",
-
-                `**משתמש:** ${newState.member?.user.tag || "לא ידוע"}\n`
-                + `**חדר:** ${newState.channel.name}`
-            );
-        }
-
-        if (
-            oldState.channel &&
-            !newState.channel
-        ) {
-
-            await sendLog(
-
-                newState.guild,
-
-                "🔇 יציאה מחדר קולי",
-
-                `**משתמש:** ${oldState.member?.user.tag || "לא ידוע"}\n`
-                + `**חדר:** ${oldState.channel.name}`
-            );
-        }
-    }
-);
-
-// ============================================================
-// 📁 CHANNEL LOG
-// ============================================================
-
-client.on(
-    "channelCreate",
-    async channel => {
-
-        if (
-            !channel.guild
-        ) {
-            return;
-        }
-
-        await sendLog(
-
-            channel.guild,
-
-            "📁 חדר נוצר",
-
-            `**חדר:** ${channel.name}\n`
-            + `**ID:** ${channel.id}`
-        );
-    }
-);
-
-client.on(
-    "channelDelete",
-    async channel => {
-
-        if (
-            !channel.guild
-        ) {
-            return;
-        }
-
-        await sendLog(
-
-            channel.guild,
-
-            "🗑️ חדר נמחק",
-
-            `**חדר:** ${channel.name}\n`
-            + `**ID:** ${channel.id}`
-        );
-    }
-);
-
-// ============================================================
-// 🛡️ ROLE CREATE / DELETE
-// ============================================================
-
-client.on(
-    "roleCreate",
-    async role => {
-
-        await sendLog(
-
-            role.guild,
-
-            "🛡️ רול נוצר",
-
-            `**רול:** ${role.name}\n`
-            + `**ID:** ${role.id}`
-        );
-    }
-);
-
-client.on(
-    "roleDelete",
-    async role => {
-
-        await sendLog(
-
-            role.guild,
-
-            "🗑️ רול נמחק",
-
-            `**רול:** ${role.name}\n`
-            + `**ID:** ${role.id}`
-        );
-    }
-);
-
-// ============================================================
-// 🔨 BAN LOG
-// ============================================================
-
-client.on(
-    "guildBanAdd",
-    async ban => {
-
-        await sendLog(
-
-            ban.guild,
-
-            "🔨 משתמש קיבל Ban",
-
-            `**משתמש:** ${ban.user.tag}\n`
-            + `**ID:** ${ban.user.id}`
-        );
-    }
-);
-
-client.on(
-    "guildBanRemove",
-    async ban => {
-
-        await sendLog(
-
-            ban.guild,
-
-            "🔓 Ban הוסר",
-
-            `**משתמש:** ${ban.user.tag}\n`
-            + `**ID:** ${ban.user.id}`
-        );
-    }
-);
-
-// ============================================================
-// ❌ ERRORS
-// ============================================================
-
-client.on(
-    "error",
-    error => {
-
-        console.error(
-            "❌ Discord error:",
-            error
-        );
-    }
+  'error',
+  function (error) {
+    console.error(
+      'Discord Error:',
+      error
+    );
+  }
 );
 
 process.on(
-    "unhandledRejection",
-    error => {
+  'unhandledRejection',
+  function (error) {
+    console.error(
+      'Unhandled Rejection:',
+      error
+    );
+  }
+);
 
-        console.error(
-            "❌ Unhandled rejection:",
-            error
-        );
-    }
+process.on(
+  'uncaughtException',
+  function (error) {
+    console.error(
+      'Uncaught Exception:',
+      error
+    );
+  }
 );
 
 // ============================================================
-// 🌐 RENDER SERVER
+// LOGIN
 // ============================================================
 
-const PORT =
-    process.env.PORT || 10000;
-
-const server =
-    http.createServer(
-
-        async (
-            req,
-            res
-        ) => {
-
-            if (
-                req.url ===
-                "/health"
-            ) {
-
-                res.writeHead(
-
-                    200,
-
-                    {
-                        "Content-Type":
-                            "application/json"
-                    }
-                );
-
-                res.end(
-
-                    JSON.stringify({
-
-                        status:
-                            "ok",
-
-                        bot:
-                            client.user
-                                ? client.user.tag
-                                : "starting"
-
-                    })
-                );
-
-                return;
-            }
-
-            res.writeHead(
-
-                200,
-
-                {
-                    "Content-Type":
-                        "text/plain; charset=utf-8"
-                }
-            );
-
-            res.end(
-                "🔵 ChillZone Bot is online!"
-            );
-        }
+client.login(TOKEN).catch(
+  function (error) {
+    console.error(
+      'Discord login failed:',
+      error
     );
 
-server.listen(
-
-    PORT,
-
-    "0.0.0.0",
-
-    () => {
-
-        console.log(
-            `🌐 Render server running on port ${PORT}`
-        );
-    }
-);
-
-// ============================================================
-// 🔑 LOGIN
-// ============================================================
-
-client.login(
-    TOKEN
+    process.exit(1);
+  }
 );
